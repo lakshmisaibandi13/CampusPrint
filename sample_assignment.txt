@@ -1,0 +1,15 @@
+COLLEGE OF ENGINEERING & TECHNOLOGY
+DEPARTMENT OF COMPUTER SCIENCE
+ASSIGNMENT 1: OPERATING SYSTEMS & DISTRIBUTED COMPUTING
+
+Student Name: Priya Patel
+Roll Number: CS-2026-104
+Semester: 6th Semester
+
+Topics Covered:
+1. Process Synchronization & Mutexes
+2. Memory Management & Paging
+3. Cloud Architecture & Microservices
+
+Submission Date: 12th September 2026
+Instructor: Dr. R. K. Sharma

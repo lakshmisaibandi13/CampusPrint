@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded / temporary documents
+*.pdf
+
+# Uploaded files
+backend/uploads/
+
+# Test screenshots / debug images
+backend/debug_*.png
+backend/scratch_*.png
+backend/*crop*.png
+backend/padded_*.png
+backend/digit_*.png
+backend/glyph_*.png
+test_*.png
+
+# Frontend dependencies/build output
+frontend/node_modules/
+frontend/dist/
+
+# Local tools
+cloudflared.exe
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
