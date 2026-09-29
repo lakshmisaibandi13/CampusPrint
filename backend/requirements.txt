@@ -5,3 +5,4 @@ python-dotenv==1.0.1
 PyMuPDF==1.28.2
 Pillow==11.3.0
 pytesseract==0.3.13
+gunicorn==22.0.4
