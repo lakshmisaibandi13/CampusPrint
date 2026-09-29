@@ -53,12 +53,15 @@ function calcItemQuote(pages, copies, colorMode, sideMode) {
   if (!pages || !copies) return null;
   const isDouble      = sideMode === "double";
   const isColor       = colorMode === "color";
-  const rate          = isDouble ? (isColor ? 8 : 3) : (isColor ? COLOR_RATE : BW_RATE);
-  const rateUnit      = isDouble ? "paper" : "page";
+  const useDoubleRate = isDouble && pages > 1;
+  const rate          = useDoubleRate ? (isColor ? 8 : 3) : (isColor ? COLOR_RATE : BW_RATE);
+  const rateUnit      = useDoubleRate ? "paper" : "page";
   const sheetsPerCopy = isDouble ? Math.ceil(pages / 2) : pages;
 
   let costPerCopy;
-  if (isDouble) {
+  if (pages === 1) {
+    costPerCopy = isColor ? COLOR_RATE : BW_RATE;
+  } else if (isDouble) {
     if (isColor) {
       costPerCopy = Math.floor(pages / 2) * 8 + (pages % 2) * 5;
     } else {
