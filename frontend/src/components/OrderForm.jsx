@@ -53,7 +53,8 @@ function calcItemQuote(pages, copies, colorMode, sideMode) {
   if (!pages || !copies) return null;
   const isDouble      = sideMode === "double";
   const isColor       = colorMode === "color";
-  const rate          = isColor ? COLOR_RATE : BW_RATE;
+  const rate          = isDouble ? (isColor ? 8 : 3) : (isColor ? COLOR_RATE : BW_RATE);
+  const rateUnit      = isDouble ? "paper" : "page";
   const sheetsPerCopy = isDouble ? Math.ceil(pages / 2) : pages;
 
   let costPerCopy;
@@ -71,6 +72,7 @@ function calcItemQuote(pages, copies, colorMode, sideMode) {
 
   return {
     rate,
+    rateUnit,
     sheetsPerCopy,
     totalSheets:      sheetsPerCopy * copies,
     totalPrintedPages: pages * copies,
@@ -309,7 +311,7 @@ function FileCard({ item, index, onUpdate, onRemove, pricingConfig }) {
                 Sheets: <strong style={{ color: "var(--text-main)" }}>{q.totalSheets}</strong>
               </span>
               <span style={{ color: "var(--text-muted)" }}>
-                Rate: <strong style={{ color: "var(--text-main)" }}>₹{q.rate}/page</strong>
+                Rate: <strong style={{ color: "var(--text-main)" }}>₹{q.rate}/{q.rateUnit}</strong>
               </span>
               <span style={{ color: "var(--primary)", fontWeight: 700 }}>
                 Subtotal: ₹{q.printingCost.toFixed(2)}
