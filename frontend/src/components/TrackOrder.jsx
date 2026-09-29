@@ -277,7 +277,7 @@ export default function TrackOrder() {
     setError(null);
     setResults(null);
     try {
-      const res = await fetch(`/api/orders/track/${encodeURIComponent(q)}`);
+      const res = await fetch(`https://campusprint-syv1.onrender.com/api/orders/track/${encodeURIComponent(q)}`);
       const data = await res.json();
       if (data.success) {
         setResults(data.orders);

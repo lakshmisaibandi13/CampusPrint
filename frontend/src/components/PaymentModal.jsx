@@ -16,7 +16,7 @@ import {
   Clock, RefreshCw, ImagePlus, CreditCard, Info
 } from "lucide-react";
 
-const API = "/api/payment";
+const API = "https://campusprint-syv1.onrender.com/api/payment";
 const VERIFY_WINDOW_SECONDS = 600; // 10 minutes
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

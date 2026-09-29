@@ -45,7 +45,7 @@ function LoginForm({ onLogin }) {
     if (!username || !password) { setError("Enter username and password."); return; }
     setLoading(true); setError(null);
     try {
-      const res = await fetch("/api/staff/login", {
+      const res = await fetch("https://campusprint-syv1.onrender.com/api/staff/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
@@ -105,7 +105,7 @@ function OrderActions({ order, onStatusUpdate }) {
   async function updateStatus(newStatus, rejectionReason) {
     setLoading(true);
     try {
-      const res = await fetch(`/api/staff/orders/${order.order_id}/status`, {
+      const res = await fetch(`https://campusprint-syv1.onrender.com/api/staff/orders/${order.order_id}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: newStatus, rejection_reason: rejectionReason }),
@@ -200,8 +200,8 @@ export default function StaffPortal() {
       if (status && status !== "All") params.set("status", status);
       if (search) params.set("search", search);
       const [ordersRes, statsRes] = await Promise.all([
-        fetch(`/api/staff/orders?${params}`),
-        fetch("/api/staff/stats"),
+        fetch(`https://campusprint-syv1.onrender.com/api/staff/orders?${params}`),
+        fetch("https://campusprint-syv1.onrender.com/api/staff/stats"),
       ]);
       const [ordersData, statsData] = await Promise.all([ordersRes.json(), statsRes.json()]);
       if (ordersData.success) setOrders(ordersData.orders);
@@ -423,7 +423,7 @@ export default function StaffPortal() {
                           <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
                             {order.document_name && (
                               <a
-                                href={`/api/staff/orders/${order.order_id}/file`}
+                                href={`https://campusprint-syv1.onrender.com/api/staff/orders/${order.order_id}/file`}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="btn btn-outline btn-sm"

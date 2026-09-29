@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import PaymentModal from "./PaymentModal";
 
-const API = "/api";
+const API = "https://campusprint-syv1.onrender.com/api";
 const BW_RATE    = 2;
 const COLOR_RATE = 5;
 
