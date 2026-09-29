@@ -81,7 +81,7 @@ function LoginForm({ onLogin }) {
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label className="form-label">Username</label>
-            <input className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="staff@mlrit" />
+            <input className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Enter username" />
           </div>
           <div className="form-group">
             <label className="form-label">Password</label>
@@ -91,10 +91,6 @@ function LoginForm({ onLogin }) {
             {loading ? <><div className="loading-spinner" /> Signing in…</> : "Sign In"}
           </button>
         </form>
-
-        <p style={{ fontSize: ".75rem", color: "var(--text-muted)", textAlign: "center", marginTop: 16 }}>
-          Default: staff@mlrit / xerox@mlrit
-        </p>
       </div>
     </div>
   );
