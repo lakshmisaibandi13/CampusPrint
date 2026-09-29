@@ -51,14 +51,30 @@ const DEFAULT_STATIONERY = [
 // ── Pure pricing helper (mirrors database.py:calculate_order_price) ──────────
 function calcItemQuote(pages, copies, colorMode, sideMode) {
   if (!pages || !copies) return null;
-  const rate          = colorMode === "color" ? COLOR_RATE : BW_RATE;
-  const sheetsPerCopy = sideMode === "double" ? Math.ceil(pages / 2) : pages;
+  const isDouble      = sideMode === "double";
+  const isColor       = colorMode === "color";
+  const rate          = isColor ? COLOR_RATE : BW_RATE;
+  const sheetsPerCopy = isDouble ? Math.ceil(pages / 2) : pages;
+
+  let costPerCopy;
+  if (isDouble) {
+    if (isColor) {
+      costPerCopy = Math.floor(pages / 2) * 8 + (pages % 2) * 5;
+    } else {
+      costPerCopy = Math.floor(pages / 2) * 3 + (pages % 2) * 2;
+    }
+  } else {
+    costPerCopy = pages * (isColor ? COLOR_RATE : BW_RATE);
+  }
+
+  const printingCost = costPerCopy * copies;
+
   return {
     rate,
     sheetsPerCopy,
     totalSheets:      sheetsPerCopy * copies,
     totalPrintedPages: pages * copies,
-    printingCost:     pages * rate * copies,
+    printingCost,
   };
 }
 
@@ -267,7 +283,7 @@ function FileCard({ item, index, onUpdate, onRemove, pricingConfig }) {
                 onChange={(v) => onUpdate({ sideMode: v })}
                 options={[
                   { value: "single", label: "Single" },
-                  { value: "double", label: "Duplex" },
+                  { value: "double", label: "Double" },
                 ]}
               />
             </div>
@@ -1089,7 +1105,7 @@ export default function OrderForm({ onTabChange }) {
                           <div style={{ fontSize: ".78rem", color: "var(--text-muted)", marginBottom: 2 }}>
                             {it.fileInfo.pages} pages × {it.copies} {it.copies === 1 ? "copy" : "copies"} ·{" "}
                             {it.colorMode === "color" ? "Color" : "B&W"} ·{" "}
-                            {it.sideMode === "double" ? "Duplex" : "Single"}
+                            {it.sideMode === "double" ? "Double" : "Single"}
                           </div>
                           {q && (
                             <div style={{ display: "flex", justifyContent: "space-between", fontSize: ".82rem" }}>

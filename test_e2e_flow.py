@@ -29,12 +29,12 @@ def run_e2e_test():
     res = requests.post(f"{BASE_URL}/pricing/calculate", json=quote_payload)
     assert res.status_code == 200
     quote = res.json()["quote"]
-    # 8 pages * Rs.5 = Rs.40 * 2 copies = Rs.80 print
+    # 8 pages double Color: 4 pairs * Rs.8 = Rs.32 * 2 copies = Rs.64 print
     # Project report extra = Rs.15 * 2 = Rs.30
     # Spiral binding = Rs.30 * 2 = Rs.60
-    # Total = Rs.170. Total sheets = 4 * 2 = 8
+    # Total = Rs.154. Total sheets = 4 * 2 = 8
     print(f"[PASS] Quote Calculation: Total Price = Rs.{quote['total_price']}, Sheets = {quote['total_sheets']}")
-    assert quote["total_price"] == 170.0
+    assert quote["total_price"] == 154.0
     assert quote["total_sheets"] == 8
 
     # 4. Student Order Placement (with File Upload)

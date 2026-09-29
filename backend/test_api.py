@@ -25,7 +25,7 @@ class XeroxAPITestCase(unittest.TestCase):
     def test_02_calculate_quote(self):
         # 10 pages, 2 copies, black and white, double sided
         # 10 pages = 5 sheets per copy * 2 copies = 10 sheets
-        # 10 pages * ₹2 = ₹20 * 2 copies = ₹40
+        # 10 pages double B&W = 5 pairs * ₹3 = ₹15 * 2 copies = ₹30
         payload = {
             "pages": 10,
             "copies": 2,
@@ -38,9 +38,9 @@ class XeroxAPITestCase(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         quote = data["quote"]
-        self.assertEqual(quote["printing_cost"], 40.0)
+        self.assertEqual(quote["printing_cost"], 30.0)
         self.assertEqual(quote["total_sheets"], 10)
-        self.assertEqual(quote["total_price"], 40.0)
+        self.assertEqual(quote["total_price"], 30.0)
 
     def test_03_create_and_track_order(self):
         # Fake file upload

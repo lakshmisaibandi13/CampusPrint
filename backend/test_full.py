@@ -158,14 +158,15 @@ class TestCampusPrint(unittest.TestCase):
         items = d["items"]
         self.assertEqual(len(items), 3)
 
-        # JQW4: 4 pages × ₹2 × 2 copies = ₹16
+        # JQW4: 4 pages, 2 copies, double, B&W
+        # Double B&W: (4//2)*3 = 6 per copy * 2 copies = 12
         jqw = items[0]
         self.assertEqual(jqw["pages"],            4)
         self.assertEqual(jqw["copies"],           2)
         self.assertEqual(jqw["color_mode"],       "bw")
         self.assertEqual(jqw["side_mode"],        "double")
         self.assertEqual(jqw["calculated_sheets"], 4)  # ceil(4/2)×2 = 4
-        self.assertAlmostEqual(jqw["printing_cost"], 16.0)
+        self.assertAlmostEqual(jqw["printing_cost"], 12.0)
 
         # KMW4: 3 pages × ₹2 × 1 copy = ₹6
         kmw = items[1]
@@ -201,9 +202,9 @@ class TestCampusPrint(unittest.TestCase):
         ]
         res = self._post_multi(files)
         d   = res.get_json()
-        # 16 + 6 + 25 = 47
-        self.assertAlmostEqual(d["grand_total"], 47.0)
-        self.assertAlmostEqual(d["order"]["total_price"], 47.0)
+        # 12 + 6 + 25 = 43
+        self.assertAlmostEqual(d["grand_total"], 43.0)
+        self.assertAlmostEqual(d["order"]["total_price"], 43.0)
         print(f"[PASS] test_03  grand total = ₹{d['grand_total']}")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -225,8 +226,8 @@ class TestCampusPrint(unittest.TestCase):
         self.assertEqual(b["color_mode"], "bw")
         self.assertEqual(b["side_mode"],  "single")
         self.assertEqual(b["copies"],     1)
-        # A: 4p × ₹5 × 3 = ₹60 ; B: 3p × ₹2 × 1 = ₹6
-        self.assertAlmostEqual(a["printing_cost"], 60.0)
+        # A: 4p Color double x 3: (4//2)*8 = 16 * 3 = 48 ; B: 3p × ₹2 × 1 = ₹6
+        self.assertAlmostEqual(a["printing_cost"], 48.0)
         self.assertAlmostEqual(b["printing_cost"],  6.0)
         print("[PASS] test_04  settings isolation — color/copies/sides do not bleed between files")
 
@@ -246,20 +247,21 @@ class TestCampusPrint(unittest.TestCase):
     # 6. B&W double-sided: ceiling sheet calculation
     # ─────────────────────────────────────────────────────────────────────────
     def test_06_bw_double_sided(self):
-        # Even pages: 4p → 2 sheets/copy
+        # Even pages: 4p → 2 sheets/copy, 2 pairs × ₹3 × 3 copies = ₹18
         c = calculate_order_price(4, 3, "bw", "double")
         self.assertEqual(c["sheets_per_copy"], 2)
         self.assertEqual(c["total_sheets"],    6)
-        self.assertEqual(c["printing_cost"],   24.0)  # 4×₹2×3
-        # Odd pages: 5p → ceil(5/2)=3 sheets/copy
+        self.assertEqual(c["printing_cost"],   18.0)
+        # Odd pages: 5p → ceil(5/2)=3 sheets/copy, (2 pairs × ₹3 + 1 leftover × ₹2) × 2 copies = ₹16
         c = calculate_order_price(5, 2, "bw", "double")
         self.assertEqual(c["sheets_per_copy"], 3)
         self.assertEqual(c["total_sheets"],    6)
-        self.assertEqual(c["printing_cost"],   20.0)  # 5×₹2×2
-        # 1 page → 1 sheet/copy
+        self.assertEqual(c["printing_cost"],   16.0)
+        # 1 page → 1 sheet/copy, 1 leftover × ₹2 × 1 copy = ₹2
         c = calculate_order_price(1, 1, "bw", "double")
         self.assertEqual(c["sheets_per_copy"], 1)
         self.assertEqual(c["total_sheets"],    1)
+        self.assertEqual(c["printing_cost"],   2.0)
         print("[PASS] test_06  B&W double-sided ceiling: 4p→2sh/copy, 5p→3sh/copy, 1p→1sh/copy")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -284,7 +286,7 @@ class TestCampusPrint(unittest.TestCase):
         C = calculate_order_price(4, 3, "color", "single")
         self.assertEqual(C["total_sheets"], 12); self.assertEqual(C["printing_cost"], 60.0)
         D = calculate_order_price(4, 3, "bw", "double")
-        self.assertEqual(D["total_sheets"], 6);  self.assertEqual(D["printing_cost"], 24.0)
+        self.assertEqual(D["total_sheets"], 6);  self.assertEqual(D["printing_cost"], 18.0)
         print("[PASS] test_08  Examples A–D all correct")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -633,6 +635,32 @@ class TestCampusPrint(unittest.TestCase):
         self.assertNotIn("₹0", msg_none)
 
         print("[PASS] test_27  amount variations: ₹6/₹6.00/Rs.6/INR 6 pass; wrong/missing amounts correctly fail")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 28. Production pricing specification verification
+    # ─────────────────────────────────────────────────────────────────────────
+    def test_28_production_pricing_specification(self):
+        # B&W Single: 4 pages = ₹8
+        self.assertEqual(calculate_order_price(4, 1, "bw", "single")["printing_cost"], 8.0)
+        # B&W Double: 4 pages = ₹6
+        self.assertEqual(calculate_order_price(4, 1, "bw", "double")["printing_cost"], 6.0)
+        # B&W Double: 7 pages = ₹11
+        self.assertEqual(calculate_order_price(7, 1, "bw", "double")["printing_cost"], 11.0)
+        # B&W Double: 14 pages = ₹21
+        self.assertEqual(calculate_order_price(14, 1, "bw", "double")["printing_cost"], 21.0)
+        # Color Single: 4 pages = ₹20
+        self.assertEqual(calculate_order_price(4, 1, "color", "single")["printing_cost"], 20.0)
+        # Color Double: 4 pages = ₹16
+        self.assertEqual(calculate_order_price(4, 1, "color", "double")["printing_cost"], 16.0)
+        # Color Double: 7 pages = ₹29
+        self.assertEqual(calculate_order_price(7, 1, "color", "double")["printing_cost"], 29.0)
+        # Color Double: 14 pages = ₹56
+        self.assertEqual(calculate_order_price(14, 1, "color", "double")["printing_cost"], 56.0)
+        # Copies multiplier: 7-page B&W Double, 2 copies = ₹22
+        self.assertEqual(calculate_order_price(7, 2, "bw", "double")["printing_cost"], 22.0)
+        # Copies multiplier: 7-page Color Double, 2 copies = ₹58
+        self.assertEqual(calculate_order_price(7, 2, "color", "double")["printing_cost"], 58.0)
+        print("[PASS] test_28  production pricing specification: all 10 cases passed")
 
 
 if __name__ == "__main__":

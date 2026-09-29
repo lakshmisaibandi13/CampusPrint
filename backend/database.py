@@ -226,18 +226,29 @@ def calculate_order_price(pages, copies, color_mode, side_mode, print_type_id="r
     # 1. Base rate per page
     rate_per_page = pricing["color_per_page"] if color_mode.lower() == "color" else pricing["bw_per_page"]
     
-    # 2. Calculated paper sheets
+    # 2. Calculated paper sheets & printing cost
     # Single sided: 1 page = 1 sheet. Double sided: 2 pages = 1 sheet (ceil)
-    if side_mode.lower() == "double":
+    is_double = side_mode.lower() == "double"
+    is_color = color_mode.lower() == "color"
+
+    if pages <= 0:
+        sheets_per_copy = 0
+        cost_per_copy = 0.0
+    elif is_double:
         sheets_per_copy = (pages + 1) // 2
+        if is_color:
+            cost_per_copy = (pages // 2) * 8.0 + (pages % 2) * 5.0
+        else:
+            cost_per_copy = (pages // 2) * 3.0 + (pages % 2) * 2.0
     else:
         sheets_per_copy = pages
-    
+        if is_color:
+            cost_per_copy = pages * 5.0
+        else:
+            cost_per_copy = pages * 2.0
+
     total_sheets = sheets_per_copy * copies
-    
-    # 3. Print cost: (pages * rate_per_page) * copies
-    # In Indian print shops, printing both sides is charged per page impression (₹2 per page = ₹4 per sheet for B&W double sided)
-    printing_cost = pages * rate_per_page * copies
+    printing_cost = cost_per_copy * copies
     
     # 4. Optional print type surcharge
     type_extra = 0.0

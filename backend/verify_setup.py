@@ -58,15 +58,16 @@ print("Example C (4p x3 Color single): sheets=12 cost=60 PASS")
 c = calculate_order_price(4, 3, "bw", "double", "regular", "none")
 assert c["sheets_per_copy"] == 2,    f"D spc:    got {c['sheets_per_copy']}"
 assert c["total_sheets"] == 6,       f"D sheets: got {c['total_sheets']}"
-# Printing cost = pages × rate × copies = 4 × 2 × 3 = 24 (charged per page impression)
-assert c["printing_cost"] == 24.0,   f"D cost:   got {c['printing_cost']}"
-print("Example D (4p x3 B&W double): sheets=6  cost=24 PASS")
+# Printing cost = 2 pairs × ₹3 × 3 copies = 18
+assert c["printing_cost"] == 18.0,   f"D cost:   got {c['printing_cost']}"
+print("Example D (4p x3 B&W double): sheets=6  cost=18 PASS")
 
 # ── Odd-page double-sided ceiling test  (5 pages, 1 copy, double) ────────────
 c = calculate_order_price(5, 1, "bw", "double", "regular", "none")
 assert c["sheets_per_copy"] == 3,    f"Ceil sheets/copy: got {c['sheets_per_copy']}"
 assert c["total_sheets"] == 3,       f"Ceil total: got {c['total_sheets']}"
-print("Ceiling test  (5p x1 B&W double): sheets=3  PASS")
+assert c["printing_cost"] == 8.0,    f"Ceil cost: got {c['printing_cost']}"
+print("Ceiling test  (5p x1 B&W double): sheets=3  cost=8 PASS")
 
 # ── Payment session create / retrieve ────────────────────────────────────────
 with app.app_context():
