@@ -43,8 +43,12 @@ class XeroxAPITestCase(unittest.TestCase):
         self.assertEqual(quote["total_price"], 30.0)
 
     def test_03_create_and_track_order(self):
-        # Fake file upload
-        file_content = b"This is sample project report for Digital Xerox System testing."
+        import pymupdf
+        doc = pymupdf.open()
+        for _ in range(5):
+            doc.new_page()
+        file_content = doc.tobytes()
+        doc.close()
         data = {
             "student_name": "Aarav Sharma",
             "roll_number": "CS2026-042",

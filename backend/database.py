@@ -1,184 +1,472 @@
-import sqlite3
+import os
+import re
 import random
 import string
 import threading
-from datetime import datetime
+import sqlite3
+from datetime import datetime, date, timedelta
 from config import Config
+
+# Optional PostgreSQL driver support (installed via psycopg2-binary)
+try:
+    import psycopg2
+    import psycopg2.extras
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
 
 _order_creation_lock = threading.Lock()
 
+
+def is_postgres() -> bool:
+    """Return True if a DATABASE_URL is configured for PostgreSQL."""
+    db_url = getattr(Config, "DATABASE_URL", None) or os.environ.get("DATABASE_URL")
+    return bool(db_url and db_url.strip())
+
+
+def _to_pg_query(sql: str) -> str:
+    """
+    Translates SQLite-style queries to PostgreSQL-compatible queries:
+    1. Converts SQLite-specific 'BEGIN IMMEDIATE' to a no-op comment.
+    2. Converts SQLite 'SUBSTR(created_at, 1, 10)' to 'DATE(created_at)' for Postgres timestamps.
+    3. Replaces '?' parameter placeholders with '%s' outside quotes.
+    """
+    trimmed = sql.strip().rstrip(";").strip()
+    if trimmed.upper() == "BEGIN IMMEDIATE":
+        return "-- NOOP"
+
+    # Replace SUBSTR on timestamps which PostgreSQL rejects
+    sql_mod = sql.replace("SUBSTR(created_at, 1, 10)", "DATE(created_at)")
+
+    out = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(sql_mod)
+    while i < n:
+        ch = sql_mod[i]
+        if ch == "'" and not in_double:
+            if in_single and i + 1 < n and sql_mod[i + 1] == "'":
+                out.append("''")
+                i += 2
+                continue
+            in_single = not in_single
+            out.append(ch)
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+        elif ch == '?' and not in_single and not in_double:
+            out.append('%s')
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+class PostgresCursorWrapper:
+    """Wraps psycopg2 cursor to provide seamless compatibility with sqlite3 cursor semantics."""
+    def __init__(self, raw_cursor):
+        self._cur = raw_cursor
+
+    def execute(self, sql, params=None):
+        translated = _to_pg_query(sql)
+        if translated.strip() == "-- NOOP":
+            return self
+        if params is None:
+            self._cur.execute(translated)
+        else:
+            self._cur.execute(translated, params)
+        return self
+
+    def executemany(self, sql, seq_of_params):
+        translated = _to_pg_query(sql)
+        self._cur.executemany(translated, seq_of_params)
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def fetchmany(self, size=None):
+        return self._cur.fetchmany(size) if size is not None else self._cur.fetchmany()
+
+    def close(self):
+        self._cur.close()
+
+    def __iter__(self):
+        return iter(self._cur)
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
+class PostgresConnectionWrapper:
+    """Wraps psycopg2 connection to provide conn.execute() and standard connection semantics."""
+    def __init__(self, raw_conn):
+        self._conn = raw_conn
+
+    def cursor(self):
+        return PostgresCursorWrapper(self._conn.cursor())
+
+    def execute(self, sql, params=None):
+        cur = self.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self.rollback()
+        else:
+            self.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 def get_db_connection():
-    conn = sqlite3.connect(Config.DATABASE_PATH, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """
+    Returns a database connection.
+    If DATABASE_URL is set, connects to PostgreSQL using psycopg2 (for Render campusprint-db).
+    Otherwise, connects to the local SQLite database for development and testing.
+    """
+    db_url = getattr(Config, "DATABASE_URL", None) or os.environ.get("DATABASE_URL")
+    if db_url and db_url.strip():
+        if not PSYCOPG2_AVAILABLE:
+            raise RuntimeError("DATABASE_URL is configured but psycopg2 is not installed. Run 'pip install psycopg2-binary'.")
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://", 1)
+        raw_conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.DictCursor)
+        return PostgresConnectionWrapper(raw_conn)
+    else:
+        conn = sqlite3.connect(Config.DATABASE_PATH, timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
 
 def init_db():
+    """Initializes tables, applies live migrations, and seeds default staff credentials."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Orders Table
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        order_id TEXT UNIQUE NOT NULL,
-        token_number TEXT NOT NULL,
-        display_order_number INTEGER,
-        student_name TEXT NOT NULL,
-        roll_number TEXT NOT NULL,
-        phone_number TEXT NOT NULL,
-        email TEXT,
-        document_name TEXT NOT NULL,
-        stored_filename TEXT NOT NULL,
-        file_size_kb REAL DEFAULT 0,
-        print_type TEXT NOT NULL,
-        color_mode TEXT NOT NULL,
-        side_mode TEXT NOT NULL,
-        pages INTEGER NOT NULL,
-        copies INTEGER NOT NULL,
-        calculated_sheets INTEGER NOT NULL,
-        binding_type TEXT DEFAULT 'none',
-        special_instructions TEXT,
-        total_price REAL NOT NULL,
-        payment_method TEXT NOT NULL,
-        payment_status TEXT NOT NULL,
-        order_status TEXT NOT NULL DEFAULT 'Received',
-        rejection_reason TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-    # Live-migrate older databases that lack the display_order_number column
-    try:
-        cursor.execute("ALTER TABLE orders ADD COLUMN display_order_number INTEGER")
-    except Exception:
-        pass  # already exists
+    if is_postgres():
+        # PostgreSQL Schema & Migrations
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY,
+            order_id TEXT UNIQUE NOT NULL,
+            token_number TEXT NOT NULL,
+            display_order_number INTEGER,
+            student_name TEXT NOT NULL,
+            roll_number TEXT NOT NULL,
+            phone_number TEXT NOT NULL,
+            email TEXT,
+            document_name TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            file_size_kb REAL DEFAULT 0,
+            print_type TEXT NOT NULL,
+            color_mode TEXT NOT NULL,
+            side_mode TEXT NOT NULL,
+            pages INTEGER NOT NULL,
+            copies INTEGER NOT NULL,
+            calculated_sheets INTEGER NOT NULL,
+            binding_type TEXT DEFAULT 'none',
+            special_instructions TEXT,
+            total_price REAL NOT NULL,
+            payment_method TEXT NOT NULL,
+            payment_status TEXT NOT NULL,
+            order_status TEXT NOT NULL DEFAULT 'Received',
+            rejection_reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            order_type TEXT DEFAULT 'printing',
+            stationery_total REAL DEFAULT 0.0,
+            printing_total REAL DEFAULT 0.0,
+            stationery_items TEXT DEFAULT '[]',
+            print_pages_total INTEGER DEFAULT 0,
+            processing_duration_seconds INTEGER DEFAULT 0,
+            queue_position INTEGER DEFAULT 0,
+            estimated_start_time TIMESTAMP,
+            estimated_collection_time TIMESTAMP,
+            payment_completed_at TIMESTAMP
+        );
+        """)
 
-    # Backfill sequential display_order_number for any existing orders that lack one
-    cursor.execute("""
-        UPDATE orders 
-        SET display_order_number = (
-            SELECT COUNT(*) FROM orders o2 WHERE o2.id <= orders.id
-        )
-        WHERE display_order_number IS NULL
-    """)
+        cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS display_order_number INTEGER;")
 
-    # Live-migrate orders table for stationery and queue tracking
-    NEW_ORDER_COLUMNS = [
-        ("order_type", "TEXT DEFAULT 'printing'"),
-        ("stationery_total", "REAL DEFAULT 0.0"),
-        ("printing_total", "REAL DEFAULT 0.0"),
-        ("stationery_items", "TEXT DEFAULT '[]'"),
-        ("print_pages_total", "INTEGER DEFAULT 0"),
-        ("processing_duration_seconds", "INTEGER DEFAULT 0"),
-        ("queue_position", "INTEGER DEFAULT 0"),
-        ("estimated_start_time", "TIMESTAMP"),
-        ("estimated_collection_time", "TIMESTAMP"),
-        ("payment_completed_at", "TIMESTAMP"),
-    ]
-    for _col, _spec in NEW_ORDER_COLUMNS:
+        cursor.execute("""
+            UPDATE orders 
+            SET display_order_number = (
+                SELECT COUNT(*) FROM orders o2 WHERE o2.id <= orders.id
+            )
+            WHERE display_order_number IS NULL
+        """)
+
+        NEW_ORDER_COLUMNS = [
+            ("order_type", "TEXT DEFAULT 'printing'"),
+            ("stationery_total", "REAL DEFAULT 0.0"),
+            ("printing_total", "REAL DEFAULT 0.0"),
+            ("stationery_items", "TEXT DEFAULT '[]'"),
+            ("print_pages_total", "INTEGER DEFAULT 0"),
+            ("processing_duration_seconds", "INTEGER DEFAULT 0"),
+            ("queue_position", "INTEGER DEFAULT 0"),
+            ("estimated_start_time", "TIMESTAMP"),
+            ("estimated_collection_time", "TIMESTAMP"),
+            ("payment_completed_at", "TIMESTAMP"),
+        ]
+        for _col, _spec in NEW_ORDER_COLUMNS:
+            cursor.execute(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {_col} {_spec};")
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_stationery_items (
+            id SERIAL PRIMARY KEY,
+            order_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            unit_price REAL NOT NULL,
+            quantity INTEGER NOT NULL,
+            subtotal REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES orders(order_id)
+        );
+        """)
+
         try:
-            cursor.execute(f"ALTER TABLE orders ADD COLUMN {_col} {_spec}")
+            cursor.execute("UPDATE orders SET print_pages_total = pages * copies WHERE print_pages_total IS NULL OR print_pages_total = 0")
         except Exception:
             pass
 
-    # Order Stationery Items table
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS order_stationery_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        order_id TEXT NOT NULL,
-        item_id TEXT NOT NULL,
-        item_name TEXT NOT NULL,
-        unit_price REAL NOT NULL,
-        quantity INTEGER NOT NULL,
-        subtotal REAL NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (order_id) REFERENCES orders(order_id)
-    );
-    """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payment_sessions (
+            id SERIAL PRIMARY KEY,
+            session_id TEXT UNIQUE NOT NULL,
+            order_amount REAL NOT NULL,
+            session_started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            screenshot_filename TEXT,
+            verification_status TEXT NOT NULL DEFAULT 'pending',
+            verification_message TEXT,
+            transaction_ref TEXT,
+            verified_at TIMESTAMP,
+            merchant_upi_id TEXT DEFAULT '',
+            merchant_name TEXT DEFAULT '',
+            merchant_identifiers TEXT DEFAULT '[]',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
 
-    # Backfill print_pages_total for any existing orders
-    try:
-        cursor.execute("UPDATE orders SET print_pages_total = pages * copies WHERE print_pages_total IS NULL OR print_pages_total = 0")
-    except Exception:
-        pass
+        for _col, _default in [
+            ("merchant_upi_id",      "''"),
+            ("merchant_name",        "''"),
+            ("merchant_identifiers", "'[]'"),
+        ]:
+            cursor.execute(f"ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS {_col} TEXT DEFAULT {_default};")
 
-    # Payment Sessions Table
-    # Tracks UPI payment verification sessions with 10-minute windows
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS payment_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT UNIQUE NOT NULL,
-        order_amount REAL NOT NULL,
-        session_started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        expires_at TIMESTAMP NOT NULL,
-        screenshot_filename TEXT,
-        verification_status TEXT NOT NULL DEFAULT 'pending',
-        verification_message TEXT,
-        transaction_ref TEXT,
-        verified_at TIMESTAMP,
-        merchant_upi_id TEXT DEFAULT '',
-        merchant_name TEXT DEFAULT '',
-        merchant_identifiers TEXT DEFAULT '[]',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-    # Live-migrate older databases that lack the merchant snapshot columns
-    for _col, _default in [
-        ("merchant_upi_id",      "''"),
-        ("merchant_name",        "''"),
-        ("merchant_identifiers", "'[]'"),
-    ]:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS used_transaction_refs (
+            id SERIAL PRIMARY KEY,
+            transaction_ref TEXT UNIQUE NOT NULL,
+            order_amount REAL NOT NULL,
+            session_id TEXT NOT NULL,
+            used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_items (
+            id SERIAL PRIMARY KEY,
+            order_id TEXT NOT NULL,
+            item_index INTEGER NOT NULL DEFAULT 0,
+            document_name TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            file_size_kb REAL DEFAULT 0,
+            pages INTEGER NOT NULL,
+            copies INTEGER NOT NULL DEFAULT 1,
+            color_mode TEXT NOT NULL DEFAULT 'bw',
+            side_mode TEXT NOT NULL DEFAULT 'single',
+            calculated_sheets INTEGER NOT NULL,
+            printing_cost REAL NOT NULL DEFAULT 0,
+            item_total REAL NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES orders(order_id)
+        );
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS staff_users (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT DEFAULT 'staff'
+        );
+        """)
+    else:
+        # SQLite Schema & Migrations
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id TEXT UNIQUE NOT NULL,
+            token_number TEXT NOT NULL,
+            display_order_number INTEGER,
+            student_name TEXT NOT NULL,
+            roll_number TEXT NOT NULL,
+            phone_number TEXT NOT NULL,
+            email TEXT,
+            document_name TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            file_size_kb REAL DEFAULT 0,
+            print_type TEXT NOT NULL,
+            color_mode TEXT NOT NULL,
+            side_mode TEXT NOT NULL,
+            pages INTEGER NOT NULL,
+            copies INTEGER NOT NULL,
+            calculated_sheets INTEGER NOT NULL,
+            binding_type TEXT DEFAULT 'none',
+            special_instructions TEXT,
+            total_price REAL NOT NULL,
+            payment_method TEXT NOT NULL,
+            payment_status TEXT NOT NULL,
+            order_status TEXT NOT NULL DEFAULT 'Received',
+            rejection_reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
         try:
-            cursor.execute(
-                f"ALTER TABLE payment_sessions ADD COLUMN {_col} TEXT DEFAULT {_default}"
-            )
+            cursor.execute("ALTER TABLE orders ADD COLUMN display_order_number INTEGER")
         except Exception:
-            pass  # column already exists – safe to ignore
+            pass
 
-    # Used Transaction References — prevents reuse of same UPI ref ID
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS used_transaction_refs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_ref TEXT UNIQUE NOT NULL,
-        order_amount REAL NOT NULL,
-        session_id TEXT NOT NULL,
-        used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
+        cursor.execute("""
+            UPDATE orders 
+            SET display_order_number = (
+                SELECT COUNT(*) FROM orders o2 WHERE o2.id <= orders.id
+            )
+            WHERE display_order_number IS NULL
+        """)
 
-    # Order Items — one row per uploaded file within a multi-file order
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS order_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        order_id TEXT NOT NULL,
-        item_index INTEGER NOT NULL DEFAULT 0,
-        document_name TEXT NOT NULL,
-        stored_filename TEXT NOT NULL,
-        file_size_kb REAL DEFAULT 0,
-        pages INTEGER NOT NULL,
-        copies INTEGER NOT NULL DEFAULT 1,
-        color_mode TEXT NOT NULL DEFAULT 'bw',
-        side_mode TEXT NOT NULL DEFAULT 'single',
-        calculated_sheets INTEGER NOT NULL,
-        printing_cost REAL NOT NULL DEFAULT 0,
-        item_total REAL NOT NULL DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (order_id) REFERENCES orders(order_id)
-    );
-    """)
+        NEW_ORDER_COLUMNS = [
+            ("order_type", "TEXT DEFAULT 'printing'"),
+            ("stationery_total", "REAL DEFAULT 0.0"),
+            ("printing_total", "REAL DEFAULT 0.0"),
+            ("stationery_items", "TEXT DEFAULT '[]'"),
+            ("print_pages_total", "INTEGER DEFAULT 0"),
+            ("processing_duration_seconds", "INTEGER DEFAULT 0"),
+            ("queue_position", "INTEGER DEFAULT 0"),
+            ("estimated_start_time", "TIMESTAMP"),
+            ("estimated_collection_time", "TIMESTAMP"),
+            ("payment_completed_at", "TIMESTAMP"),
+        ]
+        for _col, _spec in NEW_ORDER_COLUMNS:
+            try:
+                cursor.execute(f"ALTER TABLE orders ADD COLUMN {_col} {_spec}")
+            except Exception:
+                pass
 
-    # Staff Credentials / Account table
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS staff_users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        role TEXT DEFAULT 'staff'
-    );
-    """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_stationery_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            unit_price REAL NOT NULL,
+            quantity INTEGER NOT NULL,
+            subtotal REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES orders(order_id)
+        );
+        """)
 
-    # Seed / update staff user.
-    # 1. Ensure the configured username exists with the correct password.
+        try:
+            cursor.execute("UPDATE orders SET print_pages_total = pages * copies WHERE print_pages_total IS NULL OR print_pages_total = 0")
+        except Exception:
+            pass
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payment_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT UNIQUE NOT NULL,
+            order_amount REAL NOT NULL,
+            session_started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            screenshot_filename TEXT,
+            verification_status TEXT NOT NULL DEFAULT 'pending',
+            verification_message TEXT,
+            transaction_ref TEXT,
+            verified_at TIMESTAMP,
+            merchant_upi_id TEXT DEFAULT '',
+            merchant_name TEXT DEFAULT '',
+            merchant_identifiers TEXT DEFAULT '[]',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        for _col, _default in [
+            ("merchant_upi_id",      "''"),
+            ("merchant_name",        "''"),
+            ("merchant_identifiers", "'[]'"),
+        ]:
+            try:
+                cursor.execute(
+                    f"ALTER TABLE payment_sessions ADD COLUMN {_col} TEXT DEFAULT {_default}"
+                )
+            except Exception:
+                pass
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS used_transaction_refs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_ref TEXT UNIQUE NOT NULL,
+            order_amount REAL NOT NULL,
+            session_id TEXT NOT NULL,
+            used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id TEXT NOT NULL,
+            item_index INTEGER NOT NULL DEFAULT 0,
+            document_name TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            file_size_kb REAL DEFAULT 0,
+            pages INTEGER NOT NULL,
+            copies INTEGER NOT NULL DEFAULT 1,
+            color_mode TEXT NOT NULL DEFAULT 'bw',
+            side_mode TEXT NOT NULL DEFAULT 'single',
+            calculated_sheets INTEGER NOT NULL,
+            printing_cost REAL NOT NULL DEFAULT 0,
+            item_total REAL NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES orders(order_id)
+        );
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS staff_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT DEFAULT 'staff'
+        );
+        """)
+
+    # Seed / update staff user
     cursor.execute("SELECT id FROM staff_users WHERE username = ?", (Config.STAFF_USERNAME,))
     if not cursor.fetchone():
         cursor.execute(
@@ -190,7 +478,8 @@ def init_db():
             "UPDATE staff_users SET password = ? WHERE username = ?",
             (Config.STAFF_PASSWORD, Config.STAFF_USERNAME)
         )
-    # 2. Remove any stale rows for old default usernames so they can no longer log in.
+
+    # Clean up stale rows for old default usernames
     OLD_DEFAULT_USERNAMES = ["staff", "staff@melody", "admin"]
     for _old in OLD_DEFAULT_USERNAMES:
         if _old != Config.STAFF_USERNAME:
@@ -199,6 +488,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 def generate_order_id(for_date: str = None):
     if for_date:
         now_str = str(for_date)[:10].replace("-", "")
@@ -206,6 +496,7 @@ def generate_order_id(for_date: str = None):
         now_str = datetime.now().strftime("%Y%m%d")
     random_suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
     return f"ORD-{now_str}-{random_suffix}"
+
 
 def generate_token_number(conn=None):
     _own = conn is None
@@ -220,6 +511,7 @@ def generate_token_number(conn=None):
     token_num = 101 + count
     return f"TK-{token_num}"
 
+
 def calculate_order_price(pages, copies, color_mode, side_mode, print_type_id="regular", binding_id="none"):
     pricing = Config.PRICING
     
@@ -227,7 +519,6 @@ def calculate_order_price(pages, copies, color_mode, side_mode, print_type_id="r
     rate_per_page = pricing["color_per_page"] if color_mode.lower() == "color" else pricing["bw_per_page"]
     
     # 2. Calculated paper sheets & printing cost
-    # Single sided: 1 page = 1 sheet. Double sided: 2 pages = 1 sheet (ceil)
     is_double = side_mode.lower() == "double"
     is_color = color_mode.lower() == "color"
 
@@ -275,7 +566,6 @@ def calculate_order_price(pages, copies, color_mode, side_mode, print_type_id="r
         "total_price": total
     }
 
-# ── Printing Duration & Queue Calculations ─────────────────────────────────
 
 def calculate_printing_duration_seconds(total_pages: int) -> int:
     """
@@ -318,6 +608,7 @@ def calculate_printing_duration_seconds(total_pages: int) -> int:
         extra_blocks = (total_pages - 50 + 4) // 5
         return 700 + extra_blocks * 60
 
+
 def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
     """
     Two-Worker Shop Model:
@@ -329,7 +620,6 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
     When an order is Ready for Collection, Completed, Collected, or Rejected,
     its remaining time is automatically excluded from the queue.
     """
-    from datetime import datetime, timedelta
     _own = conn is None
     if _own:
         conn = get_db_connection()
@@ -358,7 +648,6 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
 
     # Fetch active pending printing orders from today.
     # Excludes orders already Completed, Ready for Collection, Cancelled, or Failed payment.
-    today_start = now.strftime("%Y-%m-%d 00:00:00")
     today_date = now.strftime("%Y-%m-%d")
     cursor.execute("""
         SELECT id, order_id, display_order_number, print_pages_total, pages, copies,
@@ -367,9 +656,9 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
         WHERE LOWER(order_status) IN ('received', 'order received', 'processing', 'printing in progress')
           AND LOWER(COALESCE(payment_status, 'verified')) NOT IN ('failed', 'rejected')
           AND (print_pages_total > 0 OR (print_pages_total IS NULL AND pages > 0))
-          AND (DATE(created_at) = ? OR SUBSTR(created_at, 1, 10) = ?)
+          AND DATE(created_at) = ?
         ORDER BY id ASC
-    """, (today_date, today_date))
+    """, (today_date,))
     pending_rows = cursor.fetchall()
 
     printer_free_at = now
@@ -378,7 +667,9 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
     for p in pending_rows:
         p_coll = None
         p_coll_raw = p["estimated_collection_time"]
-        if p_coll_raw:
+        if isinstance(p_coll_raw, (datetime, date)):
+            p_coll = p_coll_raw
+        elif p_coll_raw:
             try:
                 p_coll = datetime.fromisoformat(str(p_coll_raw).replace("Z", ""))
             except Exception:
@@ -387,10 +678,13 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
         if not p_coll:
             p_pages = p["print_pages_total"] or (p["pages"] * (p["copies"] or 1))
             p_dur = calculate_printing_duration_seconds(p_pages)
-            try:
-                p_created = datetime.fromisoformat(str(p["created_at"]).replace("Z", ""))
-            except Exception:
-                p_created = now
+            if isinstance(p["created_at"], (datetime, date)):
+                p_created = p["created_at"]
+            else:
+                try:
+                    p_created = datetime.fromisoformat(str(p["created_at"]).replace("Z", ""))
+                except Exception:
+                    p_created = now
             p_coll = p_created + timedelta(seconds=p_dur)
 
         # Only orders whose collection time is in the future have remaining processing time
@@ -426,12 +720,24 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
         conn.close()
     return res
 
+
 def _serialize_order(order_dict: dict, conn=None) -> dict:
     """Helper to enrich raw DB order dict with parsed JSON, queue status, and formatted times."""
     if not order_dict:
         return order_dict
     import json
     d = dict(order_dict)
+
+    # Standardize datetime/date fields to ISO/string format for consistent API responses
+    for dt_col in [
+        "created_at", "updated_at", "estimated_start_time",
+        "estimated_collection_time", "payment_completed_at"
+    ]:
+        if dt_col in d and d[dt_col] is not None:
+            if isinstance(d[dt_col], (datetime, date)):
+                d[dt_col] = d[dt_col].strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                d[dt_col] = str(d[dt_col])
 
     if d.get("display_order_number") is None:
         d["display_order_number"] = d.get("id", 1)
@@ -483,7 +789,7 @@ def _serialize_order(order_dict: dict, conn=None) -> dict:
             cur.execute("""
                 SELECT COUNT(*) FROM orders
                 WHERE id < ?
-                  AND SUBSTR(created_at, 1, 10) = ?
+                  AND DATE(created_at) = ?
                   AND LOWER(order_status) IN ('received', 'order received', 'processing', 'printing in progress')
                   AND LOWER(COALESCE(payment_status, 'verified')) NOT IN ('failed', 'rejected')
                   AND LOWER(COALESCE(order_status, '')) NOT IN ('completed', 'collected', 'cancelled', 'canceled', 'ready for collection', 'stage ready', 'rejected')
@@ -503,11 +809,16 @@ def _serialize_order(order_dict: dict, conn=None) -> dict:
 
     return d
 
+
 def create_order(order_data):
     import json
     with _order_creation_lock:
         conn = get_db_connection()
-        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except Exception:
+            pass
+
         try:
             cursor = conn.cursor()
 
@@ -573,8 +884,8 @@ def create_order(order_data):
                 print_pages_total,
                 queue_info["processing_duration_seconds"],
                 queue_info["queue_position"],
-                queue_info["estimated_start_time"],
-                queue_info["estimated_collection_time"],
+                queue_info["estimated_start_time"] or None,
+                queue_info["estimated_collection_time"] or None,
                 created_at_val,
                 created_at_val,
                 created_at_val,
@@ -591,6 +902,7 @@ def create_order(order_data):
         finally:
             conn.close()
 
+
 def get_order_by_id(order_id):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -599,6 +911,7 @@ def get_order_by_id(order_id):
     res = _serialize_order(dict(row), conn=conn) if row else None
     conn.close()
     return res
+
 
 def find_order(search_query):
     query = search_query.strip().upper()
@@ -617,6 +930,7 @@ def find_order(search_query):
     conn.close()
     return res
 
+
 def list_orders(status=None, search=None, sort_by="desc"):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -625,7 +939,6 @@ def list_orders(status=None, search=None, sort_by="desc"):
     params = []
     
     if status and status.strip() and status.lower() != "all":
-        # Handle status groups
         st_clean = status.strip().lower()
         if st_clean in ("received", "order received"):
             sql += " AND LOWER(order_status) IN ('received', 'order received', 'payment successful')"
@@ -642,11 +955,11 @@ def list_orders(status=None, search=None, sort_by="desc"):
     if search and search.strip():
         term = f"%{search.strip()}%"
         sql += """ AND (
-            order_id LIKE ? OR 
-            token_number LIKE ? OR 
-            student_name LIKE ? OR 
-            roll_number LIKE ? OR 
-            phone_number LIKE ?
+            LOWER(order_id) LIKE LOWER(?) OR 
+            LOWER(token_number) LIKE LOWER(?) OR 
+            LOWER(student_name) LIKE LOWER(?) OR 
+            LOWER(roll_number) LIKE LOWER(?) OR 
+            LOWER(phone_number) LIKE LOWER(?)
         )"""
         params.extend([term, term, term, term, term])
         
@@ -660,6 +973,7 @@ def list_orders(status=None, search=None, sort_by="desc"):
     res = [_serialize_order(dict(r), conn=conn) for r in rows]
     conn.close()
     return res
+
 
 def update_order_status(order_id, new_status, rejection_reason=None):
     conn = get_db_connection()
@@ -676,6 +990,7 @@ def update_order_status(order_id, new_status, rejection_reason=None):
     res = _serialize_order(dict(row), conn=conn) if row else None
     conn.close()
     return res
+
 
 def get_stats():
     conn = get_db_connection()
@@ -700,7 +1015,7 @@ def get_stats():
     rejected = cursor.fetchone()[0]
     
     cursor.execute("SELECT COALESCE(SUM(total_price), 0) FROM orders WHERE LOWER(order_status) != 'rejected'")
-    total_revenue = round(cursor.fetchone()[0], 2)
+    total_revenue = round(float(cursor.fetchone()[0]), 2)
     
     today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
     cursor.execute("SELECT COUNT(*) FROM orders WHERE created_at >= ?", (today_start,))
@@ -718,7 +1033,6 @@ def get_stats():
         "today_orders": today_orders
     }
 
-# ── Multi-File Order Helpers ─────────────────────────────────────────────────
 
 def create_multi_order(order_data: dict, items: list[dict] = None, stationery_items: list[dict] = None) -> dict | None:
     """
@@ -731,7 +1045,11 @@ def create_multi_order(order_data: dict, items: list[dict] = None, stationery_it
     import json
     with _order_creation_lock:
         conn = get_db_connection()
-        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except Exception:
+            pass
+
         try:
             cursor = conn.cursor()
 
@@ -823,8 +1141,8 @@ def create_multi_order(order_data: dict, items: list[dict] = None, stationery_it
                 total_pages,
                 queue_info["processing_duration_seconds"],
                 queue_info["queue_position"],
-                queue_info["estimated_start_time"],
-                queue_info["estimated_collection_time"],
+                queue_info["estimated_start_time"] or None,
+                queue_info["estimated_collection_time"] or None,
                 created_at_val,
                 created_at_val,
                 created_at_val,
@@ -889,7 +1207,13 @@ def get_order_items(order_id: str) -> list[dict]:
     )
     rows = cursor.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    items = []
+    for r in rows:
+        d = dict(r)
+        if "created_at" in d and isinstance(d["created_at"], (datetime, date)):
+            d["created_at"] = d["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+        items.append(d)
+    return items
 
 
 def get_order_stationery_items(order_id: str) -> list[dict]:
@@ -902,18 +1226,17 @@ def get_order_stationery_items(order_id: str) -> list[dict]:
     )
     rows = cursor.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    items = []
+    for r in rows:
+        d = dict(r)
+        if "created_at" in d and isinstance(d["created_at"], (datetime, date)):
+            d["created_at"] = d["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+        items.append(d)
+    return items
 
-
-# ── Sequential Display Order Number ─────────────────────────────────────────
 
 def next_display_order_number(conn=None, for_date: str = None) -> int:
-    """Return the next sequential display order number for TODAY (1-based, resets daily).
-
-    Determines the maximum display_order_number for the target calendar date
-    (defaults to today's date in YYYY-MM-DD format) and returns max + 1.
-    If there are no orders for that day, returns 1.
-    """
+    """Return the next sequential display order number for TODAY (1-based, resets daily)."""
     _own = conn is None
     if _own:
         conn = get_db_connection()
@@ -926,22 +1249,16 @@ def next_display_order_number(conn=None, for_date: str = None) -> int:
     cursor.execute("""
         SELECT COALESCE(MAX(display_order_number), 0)
         FROM orders
-        WHERE DATE(created_at) = ? OR SUBSTR(created_at, 1, 10) = ?
-    """, (for_date, for_date))
+        WHERE DATE(created_at) = ?
+    """, (for_date,))
     current_max = cursor.fetchone()[0]
     if _own:
         conn.close()
     return current_max + 1
 
 
-# ── Payment Session Merchant Helpers ─────────────────────────────────────────
-
 def get_session_merchant(session: dict) -> tuple[str, str, list]:
-    """Return (upi_id, name, identifiers) from a session dict.
-
-    Falls back to live Config values for sessions created before the
-    merchant-snapshot feature was added (backward compatibility).
-    """
+    """Return (upi_id, name, identifiers) from a session dict."""
     import json as _json
     upi_id = (session.get("merchant_upi_id") or "").strip()
     name   = (session.get("merchant_name")   or "").strip()
@@ -951,7 +1268,6 @@ def get_session_merchant(session: dict) -> tuple[str, str, list]:
     except (ValueError, TypeError):
         identifiers = []
 
-    # Fall back to live Config if the row predates the snapshot feature
     if not identifiers:
         from config import Config as _C
         upi_id      = upi_id or getattr(_C, "MERCHANT_UPI_ID", "")
@@ -961,22 +1277,16 @@ def get_session_merchant(session: dict) -> tuple[str, str, list]:
     return upi_id, name, identifiers
 
 
-# ── Payment Session Helpers ───────────────────────────────────────────────────
-
 def create_payment_session(order_amount: float,
                            merchant_upi_id: str = "",
                            merchant_name: str = "",
                            merchant_identifiers: list | None = None) -> dict:
-    """Create a 10-minute payment verification session.
-
-    merchant_upi_id / merchant_name / merchant_identifiers are snapshotted
-    at creation so verification always uses the merchant that was active when
-    the QR was displayed — even if Config changes later.
-    """
+    """Create a 10-minute payment verification session."""
     import uuid as _uuid
     import json as _json
     session_id = _uuid.uuid4().hex
     identifiers_json = _json.dumps(merchant_identifiers or [])
+    expires_at = (datetime.now() + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -984,13 +1294,21 @@ def create_payment_session(order_amount: float,
             session_id, order_amount, session_started_at, expires_at,
             merchant_upi_id, merchant_name, merchant_identifiers
         )
-        VALUES (?, ?, CURRENT_TIMESTAMP, datetime('now', '+10 minutes'), ?, ?, ?)
-    """, (session_id, order_amount, merchant_upi_id, merchant_name, identifiers_json))
+        VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+    """, (session_id, order_amount, expires_at, merchant_upi_id, merchant_name, identifiers_json))
     conn.commit()
     cursor.execute("SELECT * FROM payment_sessions WHERE session_id = ?", (session_id,))
     row = cursor.fetchone()
+    res = dict(row) if row else None
+    if res:
+        for dt_col in ["session_started_at", "expires_at", "verified_at", "created_at"]:
+            if dt_col in res and res[dt_col] is not None:
+                if isinstance(res[dt_col], (datetime, date)):
+                    res[dt_col] = res[dt_col].strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    res[dt_col] = str(res[dt_col])
     conn.close()
-    return dict(row) if row else None
+    return res
 
 
 def get_payment_session(session_id: str) -> dict | None:
@@ -998,8 +1316,16 @@ def get_payment_session(session_id: str) -> dict | None:
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM payment_sessions WHERE session_id = ?", (session_id,))
     row = cursor.fetchone()
+    res = dict(row) if row else None
+    if res:
+        for dt_col in ["session_started_at", "expires_at", "verified_at", "created_at"]:
+            if dt_col in res and res[dt_col] is not None:
+                if isinstance(res[dt_col], (datetime, date)):
+                    res[dt_col] = res[dt_col].strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    res[dt_col] = str(res[dt_col])
     conn.close()
-    return dict(row) if row else None
+    return res
 
 
 def update_payment_session_verification(session_id: str, status: str, message: str,
@@ -1019,8 +1345,16 @@ def update_payment_session_verification(session_id: str, status: str, message: s
     conn.commit()
     cursor.execute("SELECT * FROM payment_sessions WHERE session_id = ?", (session_id,))
     row = cursor.fetchone()
+    res = dict(row) if row else None
+    if res:
+        for dt_col in ["session_started_at", "expires_at", "verified_at", "created_at"]:
+            if dt_col in res and res[dt_col] is not None:
+                if isinstance(res[dt_col], (datetime, date)):
+                    res[dt_col] = res[dt_col].strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    res[dt_col] = str(res[dt_col])
     conn.close()
-    return dict(row) if row else None
+    return res
 
 
 def is_transaction_ref_used(transaction_ref: str) -> bool:
@@ -1047,6 +1381,6 @@ def record_used_transaction_ref(transaction_ref: str, order_amount: float, sessi
         )
         conn.commit()
     except Exception:
-        pass  # Unique constraint — already recorded, safe to ignore
+        conn.rollback()
     finally:
         conn.close()
