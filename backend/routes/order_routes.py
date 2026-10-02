@@ -227,7 +227,7 @@ def place_order():
         "special_instructions": special_instructions,
         "total_price": calc["total_price"],
         "payment_method": payment_method,
-        "payment_status": "Paid" if payment_method != "Cash on Collection" else "Pending Cash on Collection"
+        "payment_status": "Pending Cash on Collection" if payment_method == "Cash on Collection" else "Pending"
     }
 
     new_order = create_order(order_payload)
@@ -438,8 +438,9 @@ def place_multi_order():
 
         grand_total = round(printing_total + stationery_total, 2)
 
-        # ── Verify payment session if session ID passed ───────────────────────
+        # ── Verify payment session if session ID passed (legacy OCR support) ──
         session_id = form.get("payment_session_id")
+        initial_payment_status = "Pending"
         if session_id:
             sess = get_payment_session(session_id)
             if not sess:
@@ -457,6 +458,11 @@ def place_multi_order():
                     "success": False,
                     "error": f"Payment amount mismatch: session was verified for ₹{sess['order_amount']}, but order total is ₹{grand_total}"
                 }), 400
+            initial_payment_status = "Paid"
+        elif payment_method == "Cash on Collection":
+            initial_payment_status = "Pending Cash on Collection"
+        else:
+            initial_payment_status = "Pending"
 
         order_payload = {
             "student_name":        student_name,
@@ -470,7 +476,7 @@ def place_multi_order():
             "stationery_total":    stationery_total,
             "total_price":         grand_total,
             "payment_method":      payment_method,
-            "payment_status":      "Paid",
+            "payment_status":      initial_payment_status,
         }
 
         new_order = create_multi_order(order_payload, saved_items, stationery_list)

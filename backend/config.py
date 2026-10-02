@@ -98,3 +98,18 @@ class Config:
     # Set this to the local timezone offset so time-window checks work.
     # Examples: IST=5.5  UTC=0  PST=-8
     TIMEZONE_OFFSET_HOURS = float(os.environ.get("TIMEZONE_OFFSET_HOURS", "5.5"))
+
+    # ── Razorpay Payment Gateway Credentials ────────────────────────────────
+    RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+    RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+
+    @classmethod
+    def get_razorpay_client(cls):
+        """Returns a configured Razorpay client instance, or raises ValueError if credentials are not set."""
+        key_id = cls.RAZORPAY_KEY_ID or os.environ.get("RAZORPAY_KEY_ID", "")
+        key_secret = cls.RAZORPAY_KEY_SECRET or os.environ.get("RAZORPAY_KEY_SECRET", "")
+        if not key_id or not key_secret:
+            raise ValueError("Razorpay credentials (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET) are not configured.")
+        import razorpay
+        return razorpay.Client(auth=(key_id, key_secret))

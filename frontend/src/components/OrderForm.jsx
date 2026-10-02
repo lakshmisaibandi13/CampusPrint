@@ -21,11 +21,13 @@ import {
   Upload, FileText, X, CheckCircle, Loader, Users,
   Printer, BookOpen, Layers, Scissors, Star, Plus,
   Trash2, AlertCircle, ChevronDown, ChevronUp,
-  ShoppingBag, Clock
+  ShoppingBag, Clock, CreditCard
 } from "lucide-react";
 import PaymentModal from "./PaymentModal";
 
-const API = "https://campusprint-syv1.onrender.com/api";
+const API = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+  ? "/api"
+  : (import.meta.env.VITE_API_URL || "https://campusprint-syv1.onrender.com/api");
 const BW_RATE    = 2;
 const COLOR_RATE = 5;
 
@@ -638,13 +640,14 @@ export default function OrderForm({ onTabChange }) {
   const [specialInstructions, setSpecialInstructions] = useState("");
 
   // Payment / confirmation state
-  const [showPayment,    setShowPayment]    = useState(false);
-  const [placing,        setPlacing]        = useState(false);
-  const [formError,      setFormError]      = useState(null);
-  const [confirmedOrder, setConfirmedOrder] = useState(null);
-  const [confirmedItems, setConfirmedItems] = useState([]);
-  // Persist session ID across modal open/close so the timer never resets
-  const [paymentSessionId, setPaymentSessionId] = useState(null);
+  const [showPayment,        setShowPayment]        = useState(false);
+  const [placing,            setPlacing]            = useState(false);
+  const [formError,          setFormError]          = useState(null);
+  const [confirmedOrder,     setConfirmedOrder]     = useState(null);
+  const [confirmedItems,     setConfirmedItems]     = useState([]);
+  const [activePendingOrder, setActivePendingOrder] = useState(null);
+  const [activeItems,        setActiveItems]        = useState([]);
+  const [activeStationery,   setActiveStationery]   = useState([]);
 
   // ── Inspect a single file via /api/inspect-file ───────────────────────────
   const inspectFile = useCallback(async (id, selectedFile) => {
@@ -795,19 +798,19 @@ export default function OrderForm({ onTabChange }) {
     return null;
   }
 
-  // ── Open payment modal ─────────────────────────────────────────────────────
-  function handleProceedToPayment() {
+  // ── Open payment / create order ───────────────────────────────────────────
+  async function handleProceedToPayment() {
     const err = validate();
     if (err) { setFormError(err); return; }
     setFormError(null);
-    setShowPayment(true);
-  }
 
-  // ── Called after payment verified ─────────────────────────────────────────
-  async function handlePaymentVerified(sessionId, transactionRef) {
-    setShowPayment(false);
+    // If order was already created for these items, re-open payment modal
+    if (activePendingOrder) {
+      setShowPayment(true);
+      return;
+    }
+
     setPlacing(true);
-    setFormError(null);
 
     const formData = new FormData();
     formData.append("student_name",        studentName.trim());
@@ -817,9 +820,7 @@ export default function OrderForm({ onTabChange }) {
     formData.append("print_type",          printType);
     formData.append("binding_type",        bindingType);
     formData.append("special_instructions", specialInstructions.trim());
-    formData.append("payment_method",      "UPI");
-    if (transactionRef) formData.append("upi_transaction_ref", transactionRef);
-    if (sessionId)      formData.append("payment_session_id",  sessionId);
+    formData.append("payment_method",      "Razorpay");
 
     if (selectedStationery.length > 0) {
       formData.append("stationery_items", JSON.stringify(selectedStationery));
@@ -833,20 +834,29 @@ export default function OrderForm({ onTabChange }) {
     });
 
     try {
-      const res  = await fetch(`${API}/orders/multi`, { method: "POST", body: formData });
+      const res = await fetch(`${API}/orders/multi`, { method: "POST", body: formData });
       const data = await res.json();
-      if (data.success) {
-        setConfirmedOrder(data.order);
-        setConfirmedItems(data.items || []);
-        setConfirmedStationery(data.stationery_items || selectedStationery);
+      if (data.success && data.order) {
+        setActivePendingOrder(data.order);
+        setActiveItems(data.items || []);
+        setActiveStationery(data.stationery_items || selectedStationery);
+        setShowPayment(true);
       } else {
-        setFormError(data.error || "Failed to place order. Please try again.");
+        setFormError(data.error || "Failed to create order. Please try again.");
       }
     } catch {
       setFormError("Network error. Please try again.");
     } finally {
       setPlacing(false);
     }
+  }
+
+  // ── Called after payment verified by Razorpay / backend ───────────────────
+  function handlePaymentSuccess(verifiedOrder) {
+    setShowPayment(false);
+    setConfirmedOrder(verifiedOrder || activePendingOrder);
+    setConfirmedItems(activeItems || []);
+    setConfirmedStationery(activeStationery || selectedStationery);
   }
 
   // ── Reset form ─────────────────────────────────────────────────────────────
@@ -859,7 +869,9 @@ export default function OrderForm({ onTabChange }) {
     setStudentName(""); setRollNumber(""); setPhoneNumber(""); setEmail("");
     setPrintType("regular"); setBindingType("none"); setSpecialInstructions("");
     setFormError(null);
-    setPaymentSessionId(null); // clear session so next order gets a fresh one
+    setActivePendingOrder(null);
+    setActiveItems([]);
+    setActiveStationery([]);
   }
 
   // ── Confirmed screen ───────────────────────────────────────────────────────
@@ -1195,27 +1207,32 @@ export default function OrderForm({ onTabChange }) {
               disabled={placing || (readyItems.length === 0 && selectedStationery.length === 0) || fileItems.some((it) => it.inspecting)}
             >
               {placing ? (
-                <><div className="loading-spinner" /> Placing Order…</>
+                <><div className="loading-spinner" /> Preparing Order &amp; Payment…</>
               ) : (
-                <><Printer size={18} /> Pay ₹{grandTotal.toFixed(2)} via UPI &amp; Place Order</>
+                <><CreditCard size={18} /> Pay ₹{grandTotal.toFixed(2)} with Razorpay &amp; Confirm</>
               )}
             </button>
 
             <p style={{ fontSize: ".75rem", color: "var(--text-muted)", textAlign: "center", marginTop: 10 }}>
-              UPI payment · screenshot verification
+              Online payment via Razorpay · Instant confirmation
             </p>
           </div>
         </div>
       </div>
 
-      {/* ── Payment Modal ── */}
-      {showPayment && grandTotal > 0 && (
+      {/* ── Razorpay Payment Modal ── */}
+      {showPayment && activePendingOrder && (
         <PaymentModal
-          orderAmount={grandTotal}
-          existingSessionId={paymentSessionId}
-          onSessionCreated={(sid) => setPaymentSessionId(sid)}
+          order={activePendingOrder}
+          orderAmount={activePendingOrder.total_price || grandTotal}
+          studentDetails={{
+            studentName,
+            rollNumber,
+            phoneNumber,
+            email,
+          }}
           onClose={() => setShowPayment(false)}
-          onPaymentVerified={handlePaymentVerified}
+          onPaymentVerified={handlePaymentSuccess}
         />
       )}
     </div>

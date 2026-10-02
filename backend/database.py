@@ -226,6 +226,9 @@ def init_db():
             ("estimated_start_time", "TIMESTAMP"),
             ("estimated_collection_time", "TIMESTAMP"),
             ("payment_completed_at", "TIMESTAMP"),
+            ("razorpay_order_id", "TEXT"),
+            ("razorpay_payment_id", "TEXT"),
+            ("razorpay_signature", "TEXT"),
         ]
         for _col, _spec in NEW_ORDER_COLUMNS:
             cursor.execute(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {_col} {_spec};")
@@ -370,6 +373,9 @@ def init_db():
             ("estimated_start_time", "TIMESTAMP"),
             ("estimated_collection_time", "TIMESTAMP"),
             ("payment_completed_at", "TIMESTAMP"),
+            ("razorpay_order_id", "TEXT"),
+            ("razorpay_payment_id", "TEXT"),
+            ("razorpay_signature", "TEXT"),
         ]
         for _col, _spec in NEW_ORDER_COLUMNS:
             try:
@@ -986,6 +992,64 @@ def update_order_status(order_id, new_status, rejection_reason=None):
     conn.commit()
     
     cursor.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+    row = cursor.fetchone()
+    res = _serialize_order(dict(row), conn=conn) if row else None
+    conn.close()
+    return res
+
+
+def update_order_razorpay_order_id(order_id: str, razorpay_order_id: str) -> bool:
+    """Associate a generated Razorpay order ID with the CampusPrint order."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE orders
+        SET razorpay_order_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE order_id = ?
+    """, (razorpay_order_id, order_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def mark_order_paid(order_id: str, razorpay_payment_id: str = None,
+                    razorpay_signature: str = None, razorpay_order_id: str = None) -> dict | None:
+    """
+    Mark a CampusPrint order as PAID upon verified Razorpay payment.
+    Updates payment_status, payment_method, payment_completed_at, and Razorpay transaction IDs.
+    Transitions order_status from 'Pending Payment' to 'Order Received' if applicable.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE orders
+        SET payment_status = 'Paid',
+            order_status = CASE 
+                WHEN LOWER(order_status) IN ('pending payment', 'received') THEN 'Order Received'
+                ELSE order_status 
+            END,
+            payment_completed_at = CURRENT_TIMESTAMP,
+            payment_method = 'Razorpay',
+            razorpay_payment_id = COALESCE(?, razorpay_payment_id),
+            razorpay_signature = COALESCE(?, razorpay_signature),
+            razorpay_order_id = COALESCE(?, razorpay_order_id),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE order_id = ?
+    """, (razorpay_payment_id, razorpay_signature, razorpay_order_id, order_id))
+    conn.commit()
+
+    cursor.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+    row = cursor.fetchone()
+    res = _serialize_order(dict(row), conn=conn) if row else None
+    conn.close()
+    return res
+
+
+def get_order_by_razorpay_order_id(razorpay_order_id: str) -> dict | None:
+    """Retrieve an order by its Razorpay order ID (used for webhooks and verification)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM orders WHERE razorpay_order_id = ?", (razorpay_order_id,))
     row = cursor.fetchone()
     res = _serialize_order(dict(row), conn=conn) if row else None
     conn.close()

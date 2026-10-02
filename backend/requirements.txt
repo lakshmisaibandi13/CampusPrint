@@ -7,3 +7,4 @@ Pillow==11.3.0
 pytesseract==0.3.13
 gunicorn==22.0.0
 psycopg2-binary>=2.9.9
+razorpay>=1.4.1

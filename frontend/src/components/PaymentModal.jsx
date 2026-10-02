@@ -1,483 +1,409 @@
 /**
- * PaymentModal.jsx — UPI-only payment with real QR, countdown, screenshot verify
+ * PaymentModal.jsx — Razorpay Standard Web Checkout Modal
  *
  * Flow:
- *   1. Create 10-min payment session via POST /api/payment/session
- *   2. Show real QR image (/payment_qr.png) + dynamic amount + countdown
- *   3. User pays via UPI app, takes screenshot
- *   4. User uploads screenshot → POST /api/payment/session/<id>/verify
- *   5. Show per-check verification result
- *   6. On success → call onPaymentVerified(sessionId, transactionRef)
+ *   1. Receives CampusPrint order (created with status 'Pending')
+ *   2. Calls POST /api/payment/create-order with order_id
+ *   3. Backend calculates authoritative amount in paise and returns Razorpay order_id + key_id
+ *   4. Opens Razorpay Standard Checkout (Test Mode / Live)
+ *   5. On payment completion, sends signature to POST /api/payment/verify
+ *   6. On backend verification success, displays confirmation and transitions to order queue
  */
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
-  X, Upload, CheckCircle, XCircle, AlertTriangle,
-  Clock, RefreshCw, ImagePlus, CreditCard, Info
+  X, CheckCircle, XCircle, AlertTriangle, CreditCard,
+  ShieldCheck, RefreshCw, Loader, Lock, ArrowRight, Smartphone
 } from "lucide-react";
 
-const API = "https://campusprint-syv1.onrender.com/api/payment";
-const VERIFY_WINDOW_SECONDS = 600; // 10 minutes
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-function fmt(seconds) {
-  const m = Math.floor(Math.max(0, seconds) / 60).toString().padStart(2, "0");
-  const s = (Math.max(0, seconds) % 60).toString().padStart(2, "0");
-  return `${m}:${s}`;
-}
-
-// Friendly label for each check key
-const CHECK_LABELS = {
-  screenshot_content: "Screenshot content",
-  amount:             "Payment amount",
-  receiver:           "Merchant / receiver",
-  transaction_id:     "Transaction reference ID",
-  time_window:        "Payment time",
-  payment_date:       "Payment date",
-  ocr_setup:          "Verification system",
-  ocr_read:           "Screenshot readability",
+const getApiBase = () => {
+  if (typeof window !== "undefined") {
+    if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+      return "/api";
+    }
+  }
+  return "https://campusprint-syv1.onrender.com/api";
 };
 
-function CheckRow({ checkKey, check }) {
-  const label = CHECK_LABELS[checkKey] || checkKey;
-  const isWarning = check.warning && !check.passed;
-
-  let icon, color;
-  if (check.passed) {
-    icon  = <CheckCircle  size={15} />;
-    color = "#059669";
-  } else if (isWarning) {
-    icon  = <AlertTriangle size={15} />;
-    color = "#d97706";
-  } else {
-    icon  = <XCircle size={15} />;
-    color = "#dc2626";
-  }
-
-  return (
-    <div style={{
-      display: "flex", alignItems: "flex-start", gap: 8,
-      padding: "5px 0",
-      borderBottom: "1px solid rgba(0,0,0,.06)",
-    }}>
-      <span style={{ color, flexShrink: 0, marginTop: 1 }}>{icon}</span>
-      <div style={{ fontSize: ".82rem", flex: 1 }}>
-        <span style={{ fontWeight: 700, color: "var(--text-main)" }}>{label}: </span>
-        <span style={{ color: check.passed ? "#065f46" : isWarning ? "#92400e" : "#b91c1c" }}>
-          {check.message}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-export default function PaymentModal({ orderAmount, existingSessionId, onSessionCreated, onClose, onPaymentVerified }) {
-  // Session
-  const [sessionId,      setSessionId]      = useState(null);
-  const [sessionLoading, setSessionLoading] = useState(true);
-  const [sessionError,   setSessionError]   = useState(null);
-
-  // Merchant identity — populated from the session response so it is always
-  // in sync with whatever QR / Config was active when the session was created.
-  const [merchantName, setMerchantName] = useState("CampusPrint");
-  const [merchantUpi,  setMerchantUpi]  = useState("campusprint@upi");
-
-  // Countdown
-  const [remainingSec, setRemainingSec] = useState(VERIFY_WINDOW_SECONDS);
-  const [expired,      setExpired]      = useState(false);
-  const timerRef = useRef(null);
-
-  // Screenshot upload
-  const [screenshotFile,    setScreenshotFile]    = useState(null);
-  const [screenshotPreview, setScreenshotPreview] = useState(null);
-  const [dragActive,        setDragActive]        = useState(false);
-  const fileInputRef = useRef(null);
-
-  // Verification
-  const [verifying,          setVerifying]          = useState(false);
-  const [verificationResult, setVerificationResult] = useState(null);
-
-  // QR image load error (fallback)
-  const [qrError, setQrError] = useState(false);
-
-  // ── Create / resume session on mount ──────────────────────────────────────
-  // Uses POST /api/payment/session/resume which returns an existing unexpired
-  // session when one already exists for this amount, preventing timer resets
-  // when the modal is closed and reopened.
-  const startSession = useCallback(async (forceNew = false) => {
-    setSessionLoading(true);
-    setSessionError(null);
-    setExpired(false);
-    setVerificationResult(null);
-    setScreenshotFile(null);
-    setScreenshotPreview(null);
-    try {
-      const body = { order_amount: orderAmount };
-      // Pass the existing session ID (if any) so the backend can resume it
-      if (!forceNew && existingSessionId) {
-        body.session_id = existingSessionId;
-      }
-      const res  = await fetch(`${API}/session/resume`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || "Failed to create payment session");
-      setSessionId(data.session_id);
-      setRemainingSec(data.remaining_seconds ?? VERIFY_WINDOW_SECONDS);
-      // Update displayed merchant info from the session (dynamic, never hardcoded)
-      if (data.merchant_name) setMerchantName(data.merchant_name);
-      if (data.merchant_upi)  setMerchantUpi(data.merchant_upi);
-      // Notify parent to persist the session ID across modal unmounts
-      if (onSessionCreated) onSessionCreated(data.session_id);
-    } catch (err) {
-      setSessionError(err.message);
-    } finally {
-      setSessionLoading(false);
-    }
-  }, [orderAmount, existingSessionId, onSessionCreated]);
-
-  useEffect(() => { startSession(); return () => clearInterval(timerRef.current); }, [startSession]);
-
-  // ── Countdown tick ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!sessionId || expired || sessionLoading) return;
-    clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => {
-      setRemainingSec((prev) => {
-        if (prev <= 1) { setExpired(true); clearInterval(timerRef.current); return 0; }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timerRef.current);
-  }, [sessionId, expired, sessionLoading]);
-
-  // ── File selection ─────────────────────────────────────────────────────────
-  function handleFileSelect(file) {
-    if (!file) return;
-    const ok = ["image/png", "image/jpeg", "image/jpg", "image/webp"];
-    if (!ok.includes(file.type)) {
-      alert("Please upload a PNG, JPG/JPEG, or WEBP image.");
+function loadRazorpayScript() {
+  return new Promise((resolve) => {
+    if (typeof window !== "undefined" && window.Razorpay) {
+      resolve(true);
       return;
     }
-    setScreenshotFile(file);
-    setVerificationResult(null);
-    const reader = new FileReader();
-    reader.onload = (e) => setScreenshotPreview(e.target.result);
-    reader.readAsDataURL(file);
-  }
-
-  function onDrop(e) {
-    e.preventDefault();
-    setDragActive(false);
-    handleFileSelect(e.dataTransfer.files[0]);
-  }
-
-  // ── Verify screenshot ──────────────────────────────────────────────────────
-  async function handleVerify() {
-    if (!screenshotFile || !sessionId || expired) return;
-    setVerifying(true);
-    setVerificationResult(null);
-    try {
-      const fd = new FormData();
-      fd.append("screenshot", screenshotFile);
-      const res  = await fetch(`${API}/session/${sessionId}/verify`, { method: "POST", body: fd });
-      const data = await res.json();
-      setVerificationResult(data);
-      if (data.success) {
-        setTimeout(() => onPaymentVerified(sessionId, data.transaction_ref), 1800);
-      }
-    } catch {
-      setVerificationResult({ success: false, message: "Network error. Please try again.", checks: {} });
-    } finally {
-      setVerifying(false);
+    const existing = document.querySelector('script[src="https://checkout.razorpay.com/v1/checkout.js"]');
+    if (existing) {
+      existing.addEventListener("load", () => resolve(true));
+      existing.addEventListener("error", () => resolve(false));
+      return;
     }
-  }
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.async = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
 
-  // ── Guards ─────────────────────────────────────────────────────────────────
-  const isUrgent = remainingSec <= 60 && !expired;
+export default function PaymentModal({
+  order,
+  orderAmount,
+  studentDetails = {},
+  onClose,
+  onPaymentVerified,
+}) {
+  const [loading, setLoading] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [status, setStatus] = useState("ready"); // ready | in_checkout | verifying | success | error | cancelled
+  const [errorMessage, setErrorMessage] = useState(null);
+  const [successMessage, setSuccessMessage] = useState(null);
+  const hasAutoLaunched = useRef(false);
 
-  if (sessionLoading) {
-    return (
-      <div className="modal-backdrop">
-        <div className="modal-content" style={{ textAlign: "center", padding: 48 }}>
-          <div className="loading-spinner dark"
-               style={{ margin: "0 auto 16px", width: 36, height: 36, borderWidth: 3 }} />
-          <p style={{ color: "var(--text-muted)" }}>Setting up payment session…</p>
-        </div>
-      </div>
-    );
-  }
+  const displayAmount = order?.total_price ?? orderAmount ?? 0;
+  const orderId = order?.order_id || "";
+  const tokenNumber = order?.token_number || "";
+  const displayNum = order?.display_order_number || order?.id || "";
 
-  if (sessionError) {
-    return (
-      <div className="modal-backdrop">
-        <div className="modal-content">
-          <div className="modal-header">
-            <h2 style={{ fontSize: "1.2rem", fontWeight: 700 }}>Payment Setup Failed</h2>
-            <button className="modal-close" onClick={onClose}><X size={20} /></button>
-          </div>
-          <div className="alert alert-error" style={{ marginBottom: 16 }}>{sessionError}</div>
-          <div style={{ display: "flex", gap: 12 }}>
-            <button className="btn btn-primary w-full" onClick={() => startSession(false)}>
-              <RefreshCw size={16} /> Try Again
-            </button>
-            <button className="btn btn-outline w-full" onClick={onClose}>Cancel</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // ── Launch Razorpay Checkout ──────────────────────────────────────────────
+  const handlePay = useCallback(async () => {
+    if (!orderId) {
+      setStatus("error");
+      setErrorMessage("Unable to create payment: Order ID is missing.");
+      return;
+    }
+
+    setLoading(true);
+    setStatus("ready");
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const API = getApiBase();
+
+    try {
+      // 1. Ensure Razorpay Checkout script is loaded
+      const scriptLoaded = await loadRazorpayScript();
+      if (!scriptLoaded || typeof window.Razorpay === "undefined") {
+        throw new Error("Unable to load Razorpay payment gateway. Please check your internet connection.");
+      }
+
+      // 2. Call /api/payment/create-order to get authoritative Razorpay order
+      const res = await fetch(`${API}/payment/create-order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order_id: orderId }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Unable to create payment.");
+      }
+
+      const { razorpay_key_id, razorpay_order_id, amount, currency } = data;
+
+      // 3. Configure Razorpay Checkout options
+      const options = {
+        key: razorpay_key_id,
+        amount: amount,
+        currency: currency || "INR",
+        name: "CampusPrint",
+        description: `Order #${displayNum} (${tokenNumber || orderId})`,
+        order_id: razorpay_order_id,
+        prefill: {
+          name: studentDetails.studentName || order?.student_name || "",
+          email: studentDetails.email || order?.email || "",
+          contact: studentDetails.phoneNumber || order?.phone_number || "",
+        },
+        notes: {
+          campusprint_order_id: orderId,
+        },
+        theme: {
+          color: "#2563eb",
+          backdrop_color: "rgba(15, 23, 42, 0.8)",
+        },
+        modal: {
+          ondismiss: () => {
+            setLoading(false);
+            setStatus("cancelled");
+            setErrorMessage("Payment cancelled. You can retry whenever you are ready.");
+          },
+        },
+        handler: async (response) => {
+          // 4. Server-side verification
+          setLoading(false);
+          setVerifying(true);
+          setStatus("verifying");
+
+          try {
+            const verifyRes = await fetch(`${API}/payment/verify`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                order_id: orderId,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              }),
+            });
+
+            const verifyData = await verifyRes.json();
+            if (!verifyRes.ok || !verifyData.success) {
+              setStatus("error");
+              setErrorMessage(verifyData.error || "Payment verification failed. Please contact counter staff.");
+              setVerifying(false);
+              return;
+            }
+
+            // 5. Verification succeeded!
+            setVerifying(false);
+            setStatus("success");
+            setSuccessMessage("Payment successful — your order has been confirmed.");
+
+            setTimeout(() => {
+              if (onPaymentVerified) {
+                onPaymentVerified(verifyData.order || order);
+              }
+            }, 1200);
+
+          } catch (verifyErr) {
+            setVerifying(false);
+            setStatus("error");
+            setErrorMessage("Payment verification failed. Please contact counter staff.");
+          }
+        },
+      };
+
+      // 4. Open Razorpay Checkout modal
+      const rzp = new window.Razorpay(options);
+
+      rzp.on("payment.failed", (failedResp) => {
+        setLoading(false);
+        setStatus("error");
+        const reason = failedResp.error?.description || failedResp.error?.reason || "Payment failed.";
+        setErrorMessage(`Payment failed: ${reason}`);
+      });
+
+      setStatus("in_checkout");
+      setLoading(false);
+      rzp.open();
+
+    } catch (err) {
+      setLoading(false);
+      setStatus("error");
+      setErrorMessage(err.message || "Unable to create payment.");
+    }
+  }, [orderId, displayAmount, displayNum, tokenNumber, studentDetails, order, onPaymentVerified]);
+
+  // Auto-launch checkout on initial mount once order is ready
+  useEffect(() => {
+    if (!hasAutoLaunched.current && orderId) {
+      hasAutoLaunched.current = true;
+      handlePay();
+    }
+  }, [handlePay, orderId]);
 
   return (
-    <div
-      className="modal-backdrop"
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="modal-content animate-fade">
-
-        {/* ── Header ── */}
+    <div className="modal-backdrop" onClick={status === "verifying" ? undefined : onClose}>
+      <div
+        className="modal-content animate-fade"
+        style={{ maxWidth: 520 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
         <div className="modal-header">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <CreditCard size={22} color="var(--primary)" />
-            <h2 style={{ fontSize: "1.2rem", fontWeight: 700 }}>UPI Payment</h2>
-          </div>
-          <button className="modal-close" onClick={onClose}><X size={20} /></button>
-        </div>
-
-        {/* ── Amount ── */}
-        <div className="payment-amount-display">
-          <div className="payment-amount-label">Amount to Pay</div>
-          <div className="payment-amount-value">₹{orderAmount.toFixed(2)}</div>
-          <div style={{ fontSize: ".78rem", color: "var(--text-muted)", marginTop: 4 }}>
-            Merchant: {merchantName} · {merchantUpi}
-          </div>
-        </div>
-
-        {/* ── QR + countdown row ── */}
-        <div className="qr-section">
-
-          {/* Real QR image */}
-          <div className="qr-box">
-            {!qrError ? (
-              <img
-                src="/payment_qr.png"
-                alt="CampusPrint UPI QR Code"
-                style={{
-                  width: 200, height: 200,
-                  objectFit: "contain",
-                  borderRadius: "var(--radius-sm)",
-                  display: "block",
-                }}
-                onError={() => setQrError(true)}
-              />
-            ) : (
-              /* Fallback if image file missing */
-              <div style={{
-                width: 200, height: 200,
-                display: "flex", flexDirection: "column",
-                alignItems: "center", justifyContent: "center",
-                gap: 8, border: "2px dashed #93c5fd",
-                borderRadius: "var(--radius-md)",
-                background: "var(--primary-light)",
-                color: "var(--primary)",
-              }}>
-                <Info size={36} />
-                <span style={{ fontSize: ".78rem", fontWeight: 700, textAlign: "center", padding: "0 8px" }}>
-                  QR image not found.<br />Ask staff for UPI ID.
-                </span>
-              </div>
-            )}
-            <span className="qr-upi-id" style={{ marginTop: 6 }}>{merchantUpi}</span>
-          </div>
-
-          {/* Instructions */}
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-            <p className="qr-instruction">
-              Open GPay / PhonePe / Paytm · Scan QR · Pay <strong>₹{orderAmount.toFixed(2)}</strong> to <strong>{merchantName}</strong> · Take a screenshot
-            </p>
-
-            {/* Countdown */}
-            {!expired ? (
-              <div className="countdown-wrapper">
-                <span className="countdown-label">
-                  <Clock size={12} style={{ display: "inline", marginRight: 4 }} />
-                  Verification window
-                </span>
-                <span className={`countdown-timer${isUrgent ? " urgent" : ""}`}>
-                  {fmt(remainingSec)}
-                </span>
-                {isUrgent && (
-                  <span style={{ fontSize: ".73rem", color: "#ef4444", fontWeight: 600 }}>
-                    Less than a minute left!
-                  </span>
-                )}
-              </div>
-            ) : (
-              <div className="countdown-wrapper">
-                <span className="countdown-timer expired">00:00</span>
-                <span className="countdown-expired-msg">Verification window expired</span>
-                <button
-                  className="btn btn-primary btn-sm"
-                  style={{ marginTop: 8 }}
-                  onClick={() => startSession(true)}
-                >
-                  <RefreshCw size={14} /> Restart Payment Session
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* ── Screenshot upload (only when not expired) ── */}
-        {!expired && (
-          <>
             <div style={{
-              fontWeight: 700, fontSize: ".95rem", marginBottom: 8,
-              color: "var(--text-main)",
+              width: 38, height: 38, borderRadius: "var(--radius-md)",
+              background: "var(--primary-light)", color: "var(--primary)",
+              display: "flex", alignItems: "center", justifyContent: "center"
             }}>
-              Upload Payment Screenshot
+              <CreditCard size={20} />
             </div>
-
-            {screenshotPreview ? (
-              <div style={{ marginBottom: 12 }}>
-                <div className="screenshot-preview">
-                  <img src={screenshotPreview} alt="Payment screenshot preview" />
-                </div>
-                <div style={{
-                  display: "flex", justifyContent: "space-between",
-                  alignItems: "center", marginTop: 6,
-                }}>
-                  <span style={{ fontSize: ".82rem", color: "var(--text-muted)" }}>
-                    {screenshotFile?.name}
-                  </span>
-                  <button
-                    style={{ fontSize: ".78rem", color: "var(--primary)", background: "none", border: "none", cursor: "pointer" }}
-                    onClick={() => {
-                      setScreenshotFile(null);
-                      setScreenshotPreview(null);
-                      setVerificationResult(null);
-                    }}
-                  >
-                    Change
-                  </button>
-                </div>
+            <div>
+              <h3 style={{ fontSize: "1.2rem", fontWeight: 800 }}>Razorpay Online Payment</h3>
+              <div style={{ fontSize: ".78rem", color: "var(--text-muted)" }}>
+                Fast, secure UPI, Cards &amp; NetBanking
               </div>
-            ) : (
-              <div
-                className={`screenshot-upload-area${dragActive ? " drag-active" : ""}`}
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
-                onDragLeave={() => setDragActive(false)}
-                onDrop={onDrop}
-              >
-                <ImagePlus size={34} style={{ color: "var(--primary)", marginBottom: 6 }} />
-                <div style={{ fontWeight: 700, marginBottom: 4, fontSize: ".9rem" }}>
-                  Click or drag your payment screenshot here
-                </div>
-                <div style={{ fontSize: ".75rem", color: "var(--text-muted)" }}>
-                  PNG · JPG · JPEG · WEBP · Max 10 MB
-                </div>
+            </div>
+          </div>
+          {status !== "verifying" && (
+            <button className="modal-close" onClick={onClose} aria-label="Close modal">
+              <X size={20} />
+            </button>
+          )}
+        </div>
+
+        {/* Order Details Card */}
+        <div style={{
+          background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
+          color: "#fff",
+          borderRadius: "var(--radius-lg)",
+          padding: "20px 24px",
+          marginBottom: 20,
+          boxShadow: "0 10px 25px -5px rgba(15, 23, 42, 0.3)"
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+            <div>
+              <div style={{ fontSize: ".76rem", color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 }}>
+                Order Summary
               </div>
-            )}
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/jpg,image/webp"
-              style={{ display: "none" }}
-              onChange={(e) => handleFileSelect(e.target.files[0])}
-            />
-
-            {/* ── Verification result ── */}
-            {verificationResult && (
-              <div
-                className={`verification-result ${verificationResult.success ? "success" : "failed"} animate-fade`}
-                style={{ marginTop: 14 }}
-              >
-                {/* Title */}
-                <div className="verification-result-title" style={{ marginBottom: 10 }}>
-                  {verificationResult.success
-                    ? "✓ Payment Verified Successfully"
-                    : "✗ Payment Verification Failed"}
-                </div>
-
-                {/* Per-check rows */}
-                {verificationResult.checks &&
-                  Object.entries(verificationResult.checks).map(([key, check]) => (
-                    <CheckRow key={key} checkKey={key} check={check} />
-                  ))
-                }
-
-                {/* Transaction ref */}
-                {verificationResult.transaction_ref && (
-                  <div style={{
-                    marginTop: 8, fontSize: ".78rem",
-                    color: "var(--text-muted)",
-                    background: "rgba(0,0,0,.04)",
-                    padding: "4px 8px", borderRadius: "var(--radius-sm)",
-                  }}>
-                    Transaction Ref: <strong>{verificationResult.transaction_ref}</strong>
-                  </div>
-                )}
-
-                {/* Prototype note */}
-                {verificationResult.prototype_note && (
-                  <div className="prototype-note" style={{ marginTop: 8 }}>
-                    ℹ {verificationResult.prototype_note}
-                  </div>
-                )}
-
-                {/* Top-level failure message when no checks returned */}
-                {!verificationResult.success &&
-                  (!verificationResult.checks ||
-                    Object.keys(verificationResult.checks).length === 0) && (
-                  <div style={{ fontSize: ".88rem", color: "#b91c1c", marginTop: 4 }}>
-                    {verificationResult.message}
-                  </div>
-                )}
+              <div style={{ fontSize: "1.35rem", fontWeight: 800, color: "#fff", marginTop: 2 }}>
+                Order #{displayNum}
+                {tokenNumber && <span style={{ color: "#38bdf8", marginLeft: 8, fontSize: "1rem" }}>({tokenNumber})</span>}
               </div>
-            )}
+              <div style={{ fontSize: ".78rem", color: "#cbd5e1", marginTop: 2 }}>
+                ID: {orderId}
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: ".76rem", color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 }}>
+                Amount to Pay
+              </div>
+              <div style={{ fontSize: "2rem", fontWeight: 800, color: "#38bdf8", fontFamily: "var(--font-heading)", lineHeight: 1.1 }}>
+                ₹{Number(displayAmount).toFixed(2)}
+              </div>
+            </div>
+          </div>
 
-            {/* ── Verify button ── */}
+          {(studentDetails.studentName || order?.student_name) && (
+            <div style={{
+              borderTop: "1px solid rgba(255, 255, 255, 0.12)",
+              paddingTop: 10,
+              display: "flex",
+              justifyContent: "space-between",
+              fontSize: ".82rem",
+              color: "#cbd5e1"
+            }}>
+              <span>Student: <strong>{studentDetails.studentName || order?.student_name}</strong></span>
+              {(studentDetails.rollNumber || order?.roll_number) && (
+                <span>Roll: <strong>{studentDetails.rollNumber || order?.roll_number}</strong></span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Status Alerts */}
+        {verifying && (
+          <div className="alert alert-info animate-fade" style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 12 }}>
+            <Loader size={20} className="spin-icon" style={{ flexShrink: 0, color: "var(--primary)" }} />
+            <div>
+              <strong style={{ display: "block" }}>Verifying payment server-side…</strong>
+              <span style={{ fontSize: ".82rem" }}>Confirming cryptographic signature with bank. Please do not refresh.</span>
+            </div>
+          </div>
+        )}
+
+        {status === "success" && successMessage && (
+          <div className="alert alert-success animate-fade" style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 12 }}>
+            <CheckCircle size={22} style={{ flexShrink: 0, color: "#059669" }} />
+            <div>
+              <strong style={{ display: "block", color: "#065f46" }}>{successMessage}</strong>
+              <span style={{ fontSize: ".82rem", color: "#047857" }}>Transitioning to order confirmation…</span>
+            </div>
+          </div>
+        )}
+
+        {status === "cancelled" && (
+          <div className="alert animate-fade" style={{
+            marginBottom: 20, display: "flex", alignItems: "center", gap: 12,
+            background: "#fffbeb", border: "1px solid #fde68a", color: "#92400e"
+          }}>
+            <AlertTriangle size={20} style={{ flexShrink: 0, color: "#d97706" }} />
+            <div>
+              <strong style={{ display: "block" }}>Payment cancelled</strong>
+              <span style={{ fontSize: ".82rem" }}>
+                {errorMessage || "You closed the payment window. Your documents remain saved. Click below to retry."}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {status === "error" && errorMessage && (
+          <div className="alert alert-error animate-fade" style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 12 }}>
+            <XCircle size={20} style={{ flexShrink: 0, color: "#dc2626" }} />
+            <div>
+              <strong style={{ display: "block" }}>Payment Error</strong>
+              <span style={{ fontSize: ".82rem" }}>{errorMessage}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Action Button */}
+        {status !== "success" && (
+          <div style={{ marginTop: 10 }}>
             <button
               className="btn btn-primary w-full"
-              style={{ marginTop: 14 }}
-              onClick={handleVerify}
-              disabled={!screenshotFile || verifying || !!verificationResult?.success}
+              style={{
+                padding: "14px 20px",
+                fontSize: "1.02rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 10,
+                boxShadow: "0 4px 14px rgba(37, 99, 235, 0.35)"
+              }}
+              onClick={handlePay}
+              disabled={loading || verifying}
             >
-              {verifying ? (
-                <><div className="loading-spinner" /> Verifying…</>
-              ) : verificationResult?.success ? (
-                <><CheckCircle size={18} /> Payment Verified — Proceeding…</>
+              {loading ? (
+                <>
+                  <Loader size={18} className="spin-icon" />
+                  <span>Opening Razorpay Checkout…</span>
+                </>
+              ) : verifying ? (
+                <>
+                  <Loader size={18} className="spin-icon" />
+                  <span>Verifying Payment…</span>
+                </>
+              ) : status === "cancelled" || status === "error" ? (
+                <>
+                  <RefreshCw size={18} />
+                  <span>Retry Payment (₹{Number(displayAmount).toFixed(2)})</span>
+                </>
               ) : (
-                <><Upload size={18} /> Verify Payment</>
+                <>
+                  <Lock size={18} />
+                  <span>Pay ₹{Number(displayAmount).toFixed(2)} via Razorpay</span>
+                  <ArrowRight size={18} />
+                </>
               )}
             </button>
-          </>
-        )}
-
-        {/* ── Expired — block upload ── */}
-        {expired && !verificationResult?.success && (
-          <div className="alert alert-error" style={{ marginTop: 14 }}>
-            <XCircle size={16} style={{ flexShrink: 0 }} />
-            The 10-minute verification window has expired. Please restart the payment session.
           </div>
         )}
 
-        <button
-          className="btn btn-outline w-full"
-          style={{ marginTop: 12 }}
-          onClick={onClose}
-        >
-          Cancel / Go Back
-        </button>
-
-        <p style={{ fontSize: ".72rem", color: "var(--text-subtle)", textAlign: "center", marginTop: 10 }}>
-          🔒 Prototype UPI payment · Demo verification layer
-        </p>
+        {/* Security & Supported Methods Footer */}
+        <div style={{
+          marginTop: 22,
+          paddingTop: 16,
+          borderTop: "1px solid var(--border)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          alignItems: "center",
+          textAlign: "center"
+        }}>
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            fontSize: ".75rem",
+            color: "var(--text-muted)",
+            fontWeight: 600
+          }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <ShieldCheck size={14} color="#059669" /> 256-bit Encrypted
+            </span>
+            <span>•</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <Smartphone size={14} color="var(--primary)" /> UPI / GPay / PhonePe
+            </span>
+            <span>•</span>
+            <span>Cards &amp; NetBanking</span>
+          </div>
+          <div style={{ fontSize: ".72rem", color: "var(--text-subtle)" }}>
+            Powered by Razorpay Standard Web Checkout · Direct Instant Confirmation
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -24,6 +24,10 @@ from database import (
     update_payment_session_verification,
     is_transaction_ref_used,
     record_used_transaction_ref,
+    get_order_by_id,
+    update_order_razorpay_order_id,
+    mark_order_paid,
+    get_order_by_razorpay_order_id,
 )
 from payment_verification import verify_screenshot
 
@@ -314,3 +318,241 @@ def verify_payment(session_id: str):
         "transaction_ref": transaction_ref,
         "prototype_note":  result.get("prototype_note", ""),
     }), (200 if result["success"] else 422)
+
+
+# ─── Razorpay Payment Gateway Endpoints ────────────────────────────────────────
+
+@payment_bp.route("/create-order", methods=["POST"])
+def create_razorpay_order():
+    """
+    POST /api/payment/create-order
+    1. Receive existing CampusPrint order identifier.
+    2. Retrieve order from database.
+    3. Calculate/read authoritative final amount from database (never trust frontend).
+    4. Create Razorpay Order using:
+       - amount = final amount in paise (total_price * 100)
+       - currency = INR
+       - receipt = unique CampusPrint order reference (max 40 chars)
+    5. Return razorpay_key_id, razorpay_order_id, amount, currency.
+    """
+    data = request.get_json(silent=True) or request.form.to_dict() or {}
+    order_id = (data.get("order_id") or data.get("campusprint_order_id") or "").strip()
+
+    if not order_id:
+        return jsonify({"success": False, "error": "Order ID is required."}), 400
+
+    order = get_order_by_id(order_id)
+    if not order:
+        return jsonify({"success": False, "error": f"Order '{order_id}' not found."}), 404
+
+    # Check if order is already paid
+    if str(order.get("payment_status", "")).strip().lower() == "paid":
+        return jsonify({"success": False, "error": "Order is already paid."}), 400
+
+    # Authoritative amount from database
+    try:
+        total_price = float(order.get("total_price", 0))
+    except (TypeError, ValueError):
+        total_price = 0.0
+
+    if total_price <= 0:
+        return jsonify({"success": False, "error": "Order amount must be greater than zero."}), 400
+
+    amount_paise = int(round(total_price * 100))
+
+    # Razorpay credentials check
+    key_id = Config.RAZORPAY_KEY_ID or os.environ.get("RAZORPAY_KEY_ID", "")
+    key_secret = Config.RAZORPAY_KEY_SECRET or os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_id or not key_secret:
+        return jsonify({
+            "success": False,
+            "error": "Razorpay payment gateway is not configured on this server."
+        }), 503
+
+    try:
+        import razorpay
+        client = razorpay.Client(auth=(key_id, key_secret))
+        receipt = f"rcpt_{order_id}"[-40:]
+        notes = {
+            "order_id": order_id,
+            "student_name": str(order.get("student_name", ""))[:50],
+            "roll_number": str(order.get("roll_number", ""))[:30],
+        }
+        rzp_order = client.order.create({
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": receipt,
+            "notes": notes,
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": "Failed to create Razorpay order. Please try again."
+        }), 502
+
+    razorpay_order_id = rzp_order.get("id") if isinstance(rzp_order, dict) else getattr(rzp_order, "id", None)
+    if not razorpay_order_id:
+        return jsonify({
+            "success": False,
+            "error": "Payment gateway did not return a valid order ID."
+        }), 502
+
+    # Persist the Razorpay order ID on the CampusPrint order
+    update_order_razorpay_order_id(order_id, razorpay_order_id)
+
+    return jsonify({
+        "success": True,
+        "razorpay_key_id": key_id,
+        "razorpay_order_id": razorpay_order_id,
+        "amount": amount_paise,
+        "currency": "INR",
+    }), 200
+
+
+@payment_bp.route("/verify", methods=["POST"])
+def verify_razorpay_payment():
+    """
+    POST /api/payment/verify
+    1. Receive razorpay_order_id, razorpay_payment_id, razorpay_signature, and order_id.
+    2. Retrieve order from database.
+    3. Ensure the Razorpay order belongs to the correct CampusPrint order.
+    4. Verify Razorpay signature server-side using RAZORPAY_KEY_SECRET.
+    5. If valid, mark the CampusPrint order as PAID.
+    6. If invalid, do NOT mark the order paid and return error response.
+    """
+    data = request.get_json(silent=True) or request.form.to_dict() or {}
+    order_id = (data.get("order_id") or data.get("campusprint_order_id") or "").strip()
+    razorpay_order_id = (data.get("razorpay_order_id") or "").strip()
+    razorpay_payment_id = (data.get("razorpay_payment_id") or "").strip()
+    razorpay_signature = (data.get("razorpay_signature") or "").strip()
+
+    if not order_id:
+        return jsonify({"success": False, "error": "CampusPrint order ID is required."}), 400
+
+    if not razorpay_order_id or not razorpay_payment_id or not razorpay_signature:
+        return jsonify({
+            "success": False,
+            "error": "Missing required Razorpay payment verification parameters."
+        }), 400
+
+    order = get_order_by_id(order_id)
+    if not order:
+        return jsonify({"success": False, "error": f"Order '{order_id}' not found."}), 404
+
+    # Ensure the Razorpay order belongs to the correct CampusPrint order
+    stored_rzp_order_id = order.get("razorpay_order_id")
+    if stored_rzp_order_id and stored_rzp_order_id != razorpay_order_id:
+        return jsonify({
+            "success": False,
+            "error": "Razorpay order ID mismatch with CampusPrint order."
+        }), 400
+
+    key_id = Config.RAZORPAY_KEY_ID or os.environ.get("RAZORPAY_KEY_ID", "")
+    key_secret = Config.RAZORPAY_KEY_SECRET or os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_id or not key_secret:
+        return jsonify({
+            "success": False,
+            "error": "Razorpay payment gateway credentials are not configured on this server."
+        }), 503
+
+    import razorpay
+    client = razorpay.Client(auth=(key_id, key_secret))
+
+    try:
+        client.utility.verify_payment_signature({
+            "razorpay_order_id": razorpay_order_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "razorpay_signature": razorpay_signature
+        })
+    except razorpay.errors.SignatureVerificationError:
+        return jsonify({
+            "success": False,
+            "error": "Payment verification failed: invalid signature."
+        }), 400
+    except Exception:
+        return jsonify({
+            "success": False,
+            "error": "Payment verification failed."
+        }), 400
+
+    # Signature is valid! Mark order as PAID
+    updated_order = mark_order_paid(
+        order_id=order_id,
+        razorpay_payment_id=razorpay_payment_id,
+        razorpay_signature=razorpay_signature,
+        razorpay_order_id=razorpay_order_id
+    )
+
+    return jsonify({
+        "success": True,
+        "message": "Payment verified successfully. Order confirmed.",
+        "order": updated_order
+    }), 200
+
+
+@payment_bp.route("/webhook", methods=["POST"])
+def razorpay_webhook():
+    """
+    POST /api/payment/webhook
+    Validates Razorpay webhook signatures using RAZORPAY_WEBHOOK_SECRET.
+    Marks orders paid if webhook indicates payment.captured or order.paid.
+    """
+    webhook_secret = Config.RAZORPAY_WEBHOOK_SECRET or os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+    if not webhook_secret:
+        return jsonify({
+            "success": False,
+            "error": "Webhook secret is not configured."
+        }), 400
+
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    if not signature:
+        return jsonify({
+            "success": False,
+            "error": "Missing X-Razorpay-Signature header."
+        }), 400
+
+    raw_body = request.get_data()
+
+    key_id = Config.RAZORPAY_KEY_ID or os.environ.get("RAZORPAY_KEY_ID", "")
+    key_secret = Config.RAZORPAY_KEY_SECRET or os.environ.get("RAZORPAY_KEY_SECRET", "")
+
+    import razorpay
+    client = razorpay.Client(auth=(key_id or "dummy", key_secret or "dummy"))
+
+    try:
+        client.utility.verify_webhook_signature(
+            raw_body.decode("utf-8") if isinstance(raw_body, bytes) else str(raw_body),
+            signature,
+            webhook_secret
+        )
+    except razorpay.errors.SignatureVerificationError:
+        return jsonify({"success": False, "error": "Invalid webhook signature."}), 400
+    except Exception:
+        return jsonify({"success": False, "error": "Webhook signature verification error."}), 400
+
+    payload = request.get_json(silent=True) or {}
+    event = payload.get("event", "")
+
+    if event in ("payment.captured", "order.paid"):
+        payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+        order_entity = payload.get("payload", {}).get("order", {}).get("entity", {})
+
+        rzp_order_id = payment_entity.get("order_id") or order_entity.get("id")
+        rzp_payment_id = payment_entity.get("id")
+        notes = payment_entity.get("notes") or order_entity.get("notes") or {}
+        campus_order_id = notes.get("campusprint_order_id") or notes.get("order_id")
+
+        order = None
+        if campus_order_id:
+            order = get_order_by_id(campus_order_id)
+        if not order and rzp_order_id:
+            order = get_order_by_razorpay_order_id(rzp_order_id)
+
+        if order and str(order.get("payment_status", "")).lower() != "paid":
+            mark_order_paid(
+                order_id=order["order_id"],
+                razorpay_payment_id=rzp_payment_id,
+                razorpay_order_id=rzp_order_id
+            )
+
+    return jsonify({"status": "ok"}), 200
