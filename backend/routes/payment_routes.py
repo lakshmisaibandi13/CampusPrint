@@ -27,6 +27,7 @@ from database import (
     get_order_by_id,
     update_order_razorpay_order_id,
     mark_order_paid,
+    mark_order_demo_paid,
     get_order_by_razorpay_order_id,
 )
 from payment_verification import verify_screenshot
@@ -61,12 +62,13 @@ def _live_merchant_snapshot() -> tuple[str, str, list]:
 
 @payment_bp.route("/config", methods=["GET"])
 def payment_config():
-    """Return the active merchant identity so the frontend never hardcodes it."""
+    """Return the active merchant identity and demo payment mode so the frontend never hardcodes it."""
     upi_id, name, _ = _live_merchant_snapshot()
     return jsonify({
-        "success":       True,
-        "merchant_name": name,
-        "merchant_upi":  upi_id,
+        "success":            True,
+        "merchant_name":      name,
+        "merchant_upi":       upi_id,
+        "demo_payment_mode":  Config.is_demo_payment_mode(),
     }), 200
 
 
@@ -556,3 +558,95 @@ def razorpay_webhook():
             )
 
     return jsonify({"status": "ok"}), 200
+
+
+# ─── Demo Payment Mode Endpoint ───────────────────────────────────────────────
+
+@payment_bp.route("/demo", methods=["POST"])
+def demo_payment():
+    """
+    POST /api/payment/demo
+    Safe demo payment simulation for portfolio and showcase demonstrations.
+
+    Guarantees:
+    1. Rejects request if DEMO_PAYMENT_MODE is False (403 Forbidden).
+    2. Validates order existence in CampusPrint database (404 if not found).
+    3. Reads authoritative order amount from database (never trusts client amount).
+    4. Rejects already-paid orders (400 Bad Request).
+    5. Server-side generates demo transaction ID (e.g., CPDEMO-<order_id>-<hash>).
+    6. Atomically marks order PAID, sets order_status to 'Order Received',
+       and persists demo payment method and transaction reference.
+    7. Returns authoritative confirmation payload with demo transaction ID.
+    """
+    # 1. Require DEMO_PAYMENT_MODE=true
+    if not Config.is_demo_payment_mode():
+        return jsonify({
+            "success": False,
+            "error": "Demo payment mode is disabled on this server. Real payment gateway is required."
+        }), 403
+
+    # 2. Extract and sanitize request parameters
+    data = request.get_json(silent=True) or request.form.to_dict() or {}
+    order_id = (data.get("order_id") or data.get("campusprint_order_id") or "").strip()
+
+    if not order_id:
+        return jsonify({"success": False, "error": "CampusPrint order ID is required."}), 400
+
+    # 3. Retrieve order from database
+    order = get_order_by_id(order_id)
+    if not order:
+        return jsonify({"success": False, "error": f"Order '{order_id}' not found."}), 404
+
+    # 4. Check if order is already paid
+    current_status = str(order.get("payment_status", "")).strip().lower()
+    if current_status == "paid":
+        return jsonify({"success": False, "error": "Order is already paid."}), 400
+
+    # 5. Authoritative amount from database (never trust client-supplied amount)
+    try:
+        total_price = float(order.get("total_price", 0))
+    except (TypeError, ValueError):
+        total_price = 0.0
+
+    if total_price <= 0:
+        return jsonify({"success": False, "error": "Order amount must be greater than zero."}), 400
+
+    # 6. Parse demo method and format display name
+    raw_method = str(data.get("payment_method") or "").strip().lower()
+    if "card" in raw_method:
+        demo_method = "Demo Card"
+    elif "upi" in raw_method:
+        demo_method = "Demo UPI"
+    elif "qr" in raw_method:
+        demo_method = "Demo QR"
+    elif "bank" in raw_method or "net" in raw_method:
+        demo_method = "Demo Net Banking"
+    else:
+        demo_method = "Demo Payment"
+
+    # 7. Generate server-authoritative demo transaction ID
+    unique_suffix = uuid.uuid4().hex[:6].upper()
+    demo_txn_id = f"CPDEMO-{order_id}-{unique_suffix}"
+
+    # 8. Transition order to 'Order Received' and payment_status to 'Paid'
+    updated_order = mark_order_demo_paid(
+        order_id=order_id,
+        demo_payment_id=demo_txn_id,
+        demo_payment_method=demo_method
+    )
+
+    if not updated_order:
+        return jsonify({"success": False, "error": "Failed to update order status."}), 500
+
+    return jsonify({
+        "success": True,
+        "payment_status": "Paid",
+        "demo_transaction_id": demo_txn_id,
+        "transaction_id": demo_txn_id,
+        "payment_id": demo_txn_id,
+        "payment_method": demo_method,
+        "order_status": "Order Received",
+        "order": updated_order,
+        "message": f"Demo payment of ₹{total_price:.2f} successful via {demo_method}. No real money was charged."
+    }), 200
+

@@ -598,6 +598,7 @@ export default function OrderForm({ onTabChange }) {
   const [stationeryCatalog, setStationeryCatalog] = useState(DEFAULT_STATIONERY);
   const [stationeryQuantities, setStationeryQuantities] = useState({});
   const [confirmedStationery, setConfirmedStationery] = useState([]);
+  const [isDemoMode, setIsDemoMode] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/pricing`)
@@ -610,6 +611,15 @@ export default function OrderForm({ onTabChange }) {
       .then((d) => {
         if (d.success && d.items && d.items.length > 0) {
           setStationeryCatalog(d.items);
+        }
+      })
+      .catch(() => {});
+
+    fetch(`${API}/payment/config`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.success && d.demo_payment_mode) {
+          setIsDemoMode(true);
         }
       })
       .catch(() => {});
@@ -820,7 +830,7 @@ export default function OrderForm({ onTabChange }) {
     formData.append("print_type",          printType);
     formData.append("binding_type",        bindingType);
     formData.append("special_instructions", specialInstructions.trim());
-    formData.append("payment_method",      "Razorpay");
+    formData.append("payment_method",      isDemoMode ? "Demo Payment" : "Razorpay");
 
     if (selectedStationery.length > 0) {
       formData.append("stationery_items", JSON.stringify(selectedStationery));
@@ -1208,13 +1218,17 @@ export default function OrderForm({ onTabChange }) {
             >
               {placing ? (
                 <><div className="loading-spinner" /> Preparing Order &amp; Payment…</>
+              ) : isDemoMode ? (
+                <><CreditCard size={18} /> Pay ₹{grandTotal.toFixed(2)} &amp; Confirm Order (Demo)</>
               ) : (
                 <><CreditCard size={18} /> Pay ₹{grandTotal.toFixed(2)} with Razorpay &amp; Confirm</>
               )}
             </button>
 
-            <p style={{ fontSize: ".75rem", color: "var(--text-muted)", textAlign: "center", marginTop: 10 }}>
-              Online payment via Razorpay · Instant confirmation
+            <p style={{ fontSize: ".75rem", color: isDemoMode ? "#d97706" : "var(--text-muted)", textAlign: "center", marginTop: 10, fontWeight: isDemoMode ? 600 : 400 }}>
+              {isDemoMode
+                ? "Demo Payment Mode Active • No real money will be charged"
+                : "Online payment via Razorpay · Instant confirmation"}
             </p>
           </div>
         </div>

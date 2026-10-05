@@ -104,6 +104,17 @@ class Config:
     RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
     RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
 
+    # ── Demo Payment Mode ───────────────────────────────────────────────────
+    DEMO_PAYMENT_MODE = os.environ.get("DEMO_PAYMENT_MODE", "false").strip().lower() in ("true", "1", "yes")
+
+    @classmethod
+    def is_demo_payment_mode(cls) -> bool:
+        """Returns True if DEMO_PAYMENT_MODE is enabled in env or config."""
+        env_val = os.environ.get("DEMO_PAYMENT_MODE")
+        if env_val is not None:
+            return env_val.strip().lower() in ("true", "1", "yes")
+        return bool(getattr(cls, "DEMO_PAYMENT_MODE", False))
+
     @classmethod
     def get_razorpay_client(cls):
         """Returns a configured Razorpay client instance, or raises ValueError if credentials are not set."""

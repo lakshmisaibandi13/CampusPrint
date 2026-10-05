@@ -229,6 +229,8 @@ def init_db():
             ("razorpay_order_id", "TEXT"),
             ("razorpay_payment_id", "TEXT"),
             ("razorpay_signature", "TEXT"),
+            ("payment_id", "TEXT"),
+            ("demo_transaction_id", "TEXT"),
         ]
         for _col, _spec in NEW_ORDER_COLUMNS:
             cursor.execute(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {_col} {_spec};")
@@ -376,6 +378,8 @@ def init_db():
             ("razorpay_order_id", "TEXT"),
             ("razorpay_payment_id", "TEXT"),
             ("razorpay_signature", "TEXT"),
+            ("payment_id", "TEXT"),
+            ("demo_transaction_id", "TEXT"),
         ]
         for _col, _spec in NEW_ORDER_COLUMNS:
             try:
@@ -748,6 +752,11 @@ def _serialize_order(order_dict: dict, conn=None) -> dict:
     if d.get("display_order_number") is None:
         d["display_order_number"] = d.get("id", 1)
 
+    if not d.get("payment_id") and d.get("razorpay_payment_id"):
+        d["payment_id"] = d.get("razorpay_payment_id")
+    elif not d.get("razorpay_payment_id") and d.get("payment_id"):
+        d["razorpay_payment_id"] = d.get("payment_id")
+
     raw_s = d.get("stationery_items")
     if isinstance(raw_s, str):
         try:
@@ -1030,12 +1039,46 @@ def mark_order_paid(order_id: str, razorpay_payment_id: str = None,
             END,
             payment_completed_at = CURRENT_TIMESTAMP,
             payment_method = 'Razorpay',
+            payment_id = COALESCE(?, payment_id, ?),
             razorpay_payment_id = COALESCE(?, razorpay_payment_id),
             razorpay_signature = COALESCE(?, razorpay_signature),
             razorpay_order_id = COALESCE(?, razorpay_order_id),
             updated_at = CURRENT_TIMESTAMP
         WHERE order_id = ?
-    """, (razorpay_payment_id, razorpay_signature, razorpay_order_id, order_id))
+    """, (razorpay_payment_id, razorpay_payment_id, razorpay_payment_id, razorpay_signature, razorpay_order_id, order_id))
+    conn.commit()
+
+    cursor.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+    row = cursor.fetchone()
+    res = _serialize_order(dict(row), conn=conn) if row else None
+    conn.close()
+    return res
+
+
+def mark_order_demo_paid(order_id: str, demo_payment_id: str,
+                         demo_payment_method: str = "Demo Payment") -> dict | None:
+    """
+    Mark a CampusPrint order as PAID upon verified demo payment simulation.
+    Updates payment_status, payment_method, payment_completed_at, and generated demo payment IDs.
+    Transitions order_status from 'Pending' / 'Received' to 'Order Received'.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE orders
+        SET payment_status = 'Paid',
+            order_status = CASE 
+                WHEN LOWER(order_status) IN ('pending payment', 'received', 'pending') THEN 'Order Received'
+                ELSE order_status 
+            END,
+            payment_completed_at = CURRENT_TIMESTAMP,
+            payment_method = ?,
+            payment_id = ?,
+            razorpay_payment_id = ?,
+            demo_transaction_id = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE order_id = ?
+    """, (demo_payment_method, demo_payment_id, demo_payment_id, demo_payment_id, order_id))
     conn.commit()
 
     cursor.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
