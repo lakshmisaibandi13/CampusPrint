@@ -21,7 +21,7 @@ import {
   Upload, FileText, X, CheckCircle, Loader, Users,
   Printer, BookOpen, Layers, Scissors, Star, Plus,
   Trash2, AlertCircle, ChevronDown, ChevronUp,
-  ShoppingBag, Clock, CreditCard
+  ShoppingBag, CreditCard
 } from "lucide-react";
 import PaymentModal from "./PaymentModal";
 
@@ -349,26 +349,6 @@ function ConfirmedView({ order, items, stationeryItems, onTrack, onReset }) {
             Order ID: {order.order_id}
           </div>
         </div>
-
-        {/* Smart Estimated Collection Time Banner */}
-        {order.readable_collection_time && (
-          <div style={{
-            background: "linear-gradient(135deg, #0f172a, #1e293b)",
-            border: "1.5px solid #38bdf8",
-            borderRadius: "var(--radius-lg)",
-            padding: "18px 20px",
-            marginBottom: 20,
-            textAlign: "center",
-            boxShadow: "0 4px 20px rgba(56, 189, 248, 0.15)",
-          }}>
-            <div style={{ fontSize: ".8rem", color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-              <Clock size={15} color="#38bdf8" /> Smart Collection Time
-            </div>
-            <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#38bdf8" }}>
-              Collect at approximately {order.readable_collection_time}
-            </div>
-          </div>
-        )}
 
         <div className="alert alert-success" style={{ marginBottom: 20 }}>
           <CheckCircle size={18} style={{ flexShrink: 0, marginTop: 2 }} />

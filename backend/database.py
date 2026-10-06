@@ -4,8 +4,35 @@ import random
 import string
 import threading
 import sqlite3
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from config import Config
+
+# Asia/Kolkata (IST, UTC+05:30) timezone definition
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = timezone(timedelta(hours=5, minutes=30), "IST")
+
+
+def get_ist_now() -> datetime:
+    """Return timezone-aware current datetime in Asia/Kolkata (IST, UTC+05:30)."""
+    return datetime.now(IST)
+
+
+def to_ist_datetime(val) -> datetime | None:
+    """Safely convert string, date, or datetime to timezone-aware IST datetime."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=IST) if val.tzinfo is None else val.astimezone(IST)
+    if isinstance(val, date):
+        return datetime.combine(val, datetime.min.time(), tzinfo=IST)
+    try:
+        dt = datetime.fromisoformat(str(val).replace("Z", ""))
+        return dt.replace(tzinfo=IST) if dt.tzinfo is None else dt.astimezone(IST)
+    except Exception:
+        return None
 
 # Optional PostgreSQL driver support (installed via psycopg2-binary)
 try:
@@ -503,7 +530,7 @@ def generate_order_id(for_date: str = None):
     if for_date:
         now_str = str(for_date)[:10].replace("-", "")
     else:
-        now_str = datetime.now().strftime("%Y%m%d")
+        now_str = get_ist_now().strftime("%Y%m%d")
     random_suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
     return f"ORD-{now_str}-{random_suffix}"
 
@@ -513,7 +540,7 @@ def generate_token_number(conn=None):
     if _own:
         conn = get_db_connection()
     cursor = conn.cursor()
-    today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+    today_start = get_ist_now().strftime("%Y-%m-%d 00:00:00")
     cursor.execute("SELECT COUNT(*) FROM orders WHERE created_at >= ?", (today_start,))
     count = cursor.fetchone()[0]
     if _own:
@@ -635,7 +662,7 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
         conn = get_db_connection()
     cursor = conn.cursor()
 
-    now = datetime.now()
+    now = get_ist_now()
 
     # Stationery only: Worker 2 prepares in parallel
     if total_print_pages <= 0:
@@ -675,26 +702,11 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
     active_ahead_count = 0
 
     for p in pending_rows:
-        p_coll = None
-        p_coll_raw = p["estimated_collection_time"]
-        if isinstance(p_coll_raw, (datetime, date)):
-            p_coll = p_coll_raw
-        elif p_coll_raw:
-            try:
-                p_coll = datetime.fromisoformat(str(p_coll_raw).replace("Z", ""))
-            except Exception:
-                pass
-
+        p_coll = to_ist_datetime(p["estimated_collection_time"])
         if not p_coll:
             p_pages = p["print_pages_total"] or (p["pages"] * (p["copies"] or 1))
             p_dur = calculate_printing_duration_seconds(p_pages)
-            if isinstance(p["created_at"], (datetime, date)):
-                p_created = p["created_at"]
-            else:
-                try:
-                    p_created = datetime.fromisoformat(str(p["created_at"]).replace("Z", ""))
-                except Exception:
-                    p_created = now
+            p_created = to_ist_datetime(p["created_at"]) or now
             p_coll = p_created + timedelta(seconds=p_dur)
 
         # Only orders whose collection time is in the future have remaining processing time
@@ -786,8 +798,8 @@ def _serialize_order(order_dict: dict, conn=None) -> dict:
     ect = d.get("estimated_collection_time")
     if ect:
         try:
-            dt = datetime.fromisoformat(str(ect).replace("Z", ""))
-            d["readable_collection_time"] = dt.strftime("%I:%M %p").lstrip("0")
+            dt = to_ist_datetime(ect)
+            d["readable_collection_time"] = dt.strftime("%I:%M %p").lstrip("0") if dt else str(ect)
         except Exception:
             d["readable_collection_time"] = str(ect)
     else:
@@ -837,7 +849,7 @@ def create_order(order_data):
         try:
             cursor = conn.cursor()
 
-            created_at_val = order_data.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            created_at_val = order_data.get("created_at") or get_ist_now().strftime("%Y-%m-%d %H:%M:%S")
             target_date = str(created_at_val)[:10]
 
             order_id     = generate_order_id(for_date=target_date)
@@ -1124,7 +1136,7 @@ def get_stats():
     cursor.execute("SELECT COALESCE(SUM(total_price), 0) FROM orders WHERE LOWER(order_status) != 'rejected'")
     total_revenue = round(float(cursor.fetchone()[0]), 2)
     
-    today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+    today_start = get_ist_now().strftime("%Y-%m-%d 00:00:00")
     cursor.execute("SELECT COUNT(*) FROM orders WHERE created_at >= ?", (today_start,))
     today_orders = cursor.fetchone()[0]
     
@@ -1160,7 +1172,7 @@ def create_multi_order(order_data: dict, items: list[dict] = None, stationery_it
         try:
             cursor = conn.cursor()
 
-            created_at_val = order_data.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            created_at_val = order_data.get("created_at") or get_ist_now().strftime("%Y-%m-%d %H:%M:%S")
             target_date = str(created_at_val)[:10]
 
             order_id     = generate_order_id(for_date=target_date)
@@ -1348,7 +1360,7 @@ def next_display_order_number(conn=None, for_date: str = None) -> int:
     if _own:
         conn = get_db_connection()
     if for_date is None:
-        for_date = datetime.now().strftime("%Y-%m-%d")
+        for_date = get_ist_now().strftime("%Y-%m-%d")
     else:
         for_date = str(for_date)[:10]
 

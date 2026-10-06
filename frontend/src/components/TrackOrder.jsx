@@ -25,6 +25,29 @@ function getStepIndex(status, steps, isStationeryOnly) {
   return idx >= 0 ? idx : 1;
 }
 
+function formatISTDateTime(dateInput) {
+  if (!dateInput) return "";
+  try {
+    let s = String(dateInput).trim();
+    if (!s.includes("Z") && !s.includes("+") && !/[+-]\d{2}:\d{2}$/.test(s)) {
+      s = s.replace(" ", "T") + "+05:30";
+    }
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return String(dateInput);
+    return d.toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  } catch {
+    return String(dateInput);
+  }
+}
+
 function getBadgeClass(status) {
   const map = {
     "payment successful": "badge-ready",
@@ -105,7 +128,7 @@ function OrderCard({ order }) {
             </span>
           </div>
           <div style={{ fontSize: ".82rem", color: "var(--text-muted)" }}>
-            {order.order_id} · {new Date(order.created_at).toLocaleString("en-IN")}
+            {order.order_id} · {formatISTDateTime(order.created_at)}
           </div>
         </div>
         <span className={getBadgeClass(order.order_status)}>
@@ -113,32 +136,6 @@ function OrderCard({ order }) {
           {order.order_status}
         </span>
       </div>
-
-      {/* Smart Collection Time Banner */}
-      {!isRejected && order.order_status !== "Collected" && order.order_status !== "Completed" && (
-        <div style={{
-          background: "linear-gradient(135deg, #0f172a, #1e293b)",
-          border: "1.5px solid #38bdf8",
-          borderRadius: "var(--radius-lg)",
-          padding: "16px 20px",
-          marginBottom: 20,
-          textAlign: "center",
-          boxShadow: "0 4px 18px rgba(56, 189, 248, 0.12)",
-        }}>
-          <div style={{
-            fontSize: ".78rem", color: "#94a3b8", textTransform: "uppercase",
-            letterSpacing: "0.08em", fontWeight: 700, marginBottom: 4,
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6
-          }}>
-            <Clock size={15} color="#38bdf8" /> Smart Collection Time
-          </div>
-          <div style={{ fontSize: "1.45rem", fontWeight: 800, color: "#38bdf8" }}>
-            {order.readable_collection_time
-              ? `Collect at approximately ${order.readable_collection_time}`
-              : "Ready for immediate collection"}
-          </div>
-        </div>
-      )}
 
       {/* Timeline */}
       {!isRejected && (

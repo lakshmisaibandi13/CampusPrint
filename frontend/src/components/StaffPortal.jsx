@@ -24,6 +24,26 @@ function getBadgeClass(status) {
   return "badge " + (map[status?.toLowerCase()] || "badge-received");
 }
 
+function formatISTTime(dateInput) {
+  if (!dateInput) return "—";
+  try {
+    let s = String(dateInput).trim();
+    if (!s.includes("Z") && !s.includes("+") && !/[+-]\d{2}:\d{2}$/.test(s)) {
+      s = s.replace(" ", "T") + "+05:30";
+    }
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return String(dateInput);
+    return d.toLocaleTimeString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  } catch {
+    return String(dateInput);
+  }
+}
+
 function StatCard({ value, label, color }) {
   return (
     <div className="stat-card">
@@ -369,7 +389,7 @@ export default function StaffPortal() {
                         <OrderActions order={order} onStatusUpdate={handleStatusUpdate} />
                       </td>
                       <td style={{ fontSize: ".78rem", color: "var(--text-muted)", whiteSpace: "nowrap" }}>
-                        {new Date(order.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                        {formatISTTime(order.created_at)}
                       </td>
                     </tr>
                     {expandedOrderId === order.order_id && (
