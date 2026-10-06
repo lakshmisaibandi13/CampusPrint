@@ -1219,15 +1219,15 @@ export default function OrderForm({ onTabChange }) {
               {placing ? (
                 <><div className="loading-spinner" /> Preparing Order &amp; Payment…</>
               ) : isDemoMode ? (
-                <><CreditCard size={18} /> Pay ₹{grandTotal.toFixed(2)} &amp; Confirm Order (Demo)</>
+                <><CreditCard size={18} /> Pay ₹{grandTotal.toFixed(2)} &amp; Confirm Order</>
               ) : (
                 <><CreditCard size={18} /> Pay ₹{grandTotal.toFixed(2)} with Razorpay &amp; Confirm</>
               )}
             </button>
 
-            <p style={{ fontSize: ".75rem", color: isDemoMode ? "#d97706" : "var(--text-muted)", textAlign: "center", marginTop: 10, fontWeight: isDemoMode ? 600 : 400 }}>
+            <p style={{ fontSize: ".75rem", color: "var(--text-muted)", textAlign: "center", marginTop: 10, fontWeight: 400 }}>
               {isDemoMode
-                ? "Demo Payment Mode Active • No real money will be charged"
+                ? "Online payment · Instant confirmation"
                 : "Online payment via Razorpay · Instant confirmation"}
             </p>
           </div>

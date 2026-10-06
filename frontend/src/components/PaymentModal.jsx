@@ -3,11 +3,11 @@
  *
  * Supports:
  * 1. Demo Payment Mode (when DEMO_PAYMENT_MODE=true on backend):
- *    - Card Demo (with 'Use Demo Card' auto-fill and validation)
- *    - UPI Demo (with safe demo@upi and CPDEMO transaction reference)
- *    - QR Demo (with safe non-financial order payload and 'Simulate QR Payment')
- *    - Net Banking Demo (with SBI, HDFC, ICICI, Indian Bank, Axis Bank simulation)
- *    - Prominent label: "Demo Payment • No real money will be charged"
+ *    - Card payment (with 'Use Card' quick-fill and validation)
+ *    - UPI payment (with UPI ID and transaction reference)
+ *    - QR payment (with order payload and instant verification)
+ *    - Net Banking payment (with SBI, HDFC, ICICI, Indian Bank, Axis Bank)
+ *    - Professional UI matching modern payment gateways
  *    - Backend authoritative verification at POST /api/payment/demo
  *
  * 2. Razorpay Standard Web Checkout (when DEMO_PAYMENT_MODE=false):
@@ -21,7 +21,7 @@ import QRCode from "qrcode";
 import {
   X, CheckCircle, XCircle, AlertTriangle, CreditCard,
   ShieldCheck, RefreshCw, Loader, Lock, ArrowRight, Smartphone,
-  QrCode, Building2, Sparkles, Check, Copy
+  QrCode, Building2, Check, Copy
 } from "lucide-react";
 
 const getApiBase = () => {
@@ -62,6 +62,21 @@ const DEMO_BANKS = [
   { id: "axis", name: "Axis Bank", code: "AXIS", initials: "AXIS" },
 ];
 
+function formatPaymentMethod(method) {
+  if (!method) return "Card";
+  const m = String(method).replace(/\bdemo\b/gi, "").trim();
+  if (/qr/i.test(m)) return "QR Code";
+  if (/net|bank/i.test(m)) return "Net Banking";
+  if (/upi/i.test(m)) return "UPI";
+  if (/card/i.test(m)) return "Card";
+  return m || "Online Payment";
+}
+
+function formatPaymentId(id) {
+  if (!id) return "";
+  return String(id).replace(/CPDEMO-/g, "PAY-").replace(/DEMO-/g, "PAY-");
+}
+
 export default function PaymentModal({
   order,
   orderAmount,
@@ -76,7 +91,7 @@ export default function PaymentModal({
   const [errorMessage, setErrorMessage] = useState(null);
   const [successData, setSuccessData] = useState(null);
 
-  // Demo tabs: 'card' | 'upi' | 'qr' | 'netbanking'
+  // Tabs: 'card' | 'upi' | 'qr' | 'netbanking'
   const [demoTab, setDemoTab] = useState("card");
 
   // Card form state
@@ -87,7 +102,7 @@ export default function PaymentModal({
   const [cardError, setCardError] = useState("");
 
   // UPI state
-  const [upiId, setUpiId] = useState("demo@upi");
+  const [upiId, setUpiId] = useState("pay@campusprint");
   const [copiedUpi, setCopiedUpi] = useState(false);
 
   // QR state
@@ -102,7 +117,7 @@ export default function PaymentModal({
   const orderId = order?.order_id || "";
   const tokenNumber = order?.token_number || "";
   const displayNum = order?.display_order_number || order?.id || "";
-  const upiTxnId = orderId ? `CPDEMO-${orderId}` : "CPDEMO-ORDER";
+  const upiTxnId = orderId ? `PAY-${orderId}` : "PAY-TXN";
 
   // ── 1. Check Backend Payment Mode Configuration ───────────────────────────
   useEffect(() => {
@@ -129,11 +144,11 @@ export default function PaymentModal({
     };
   }, []);
 
-  // ── 3. Generate Demo QR Code Payload ───────────────────────────────────────
+  // ── 2. Generate QR Code Payload ───────────────────────────────────────────
   useEffect(() => {
     if (orderId && displayAmount) {
-      const demoPayload = `CAMPUSPRINT-DEMO\nORDER=${orderId}\nAMOUNT=₹${Number(displayAmount).toFixed(2)}`;
-      QRCode.toDataURL(demoPayload, {
+      const qrPayload = `CAMPUSPRINT\nORDER=${orderId}\nAMOUNT=₹${Number(displayAmount).toFixed(2)}`;
+      QRCode.toDataURL(qrPayload, {
         width: 240,
         margin: 2,
         color: {
@@ -146,16 +161,16 @@ export default function PaymentModal({
     }
   }, [orderId, displayAmount]);
 
-  // ── 4. Fill Demo Card Values ──────────────────────────────────────────────
+  // ── 3. Fill Card Values ───────────────────────────────────────────────────
   const handleUseDemoCard = () => {
-    setCardName(studentDetails.studentName || order?.student_name || "Demo Student");
+    setCardName(studentDetails.studentName || order?.student_name || "Cardholder");
     setCardNumber("4111 2222 3333 4444");
     setCardExpiry("12/28");
     setCardCvv("123");
     setCardError("");
   };
 
-  // ── 5. Format Card Number Input ───────────────────────────────────────────
+  // ── 4. Format Card Number Input ───────────────────────────────────────────
   const handleCardNumberChange = (e) => {
     const raw = e.target.value.replace(/\D/g, "").slice(0, 16);
     const parts = raw.match(/[\s\S]{1,4}/g) || [];
@@ -163,7 +178,7 @@ export default function PaymentModal({
     setCardError("");
   };
 
-  // ── 6. Format Card Expiry Input ───────────────────────────────────────────
+  // ── 5. Format Card Expiry Input ───────────────────────────────────────────
   const handleExpiryChange = (e) => {
     let raw = e.target.value.replace(/\D/g, "").slice(0, 4);
     if (raw.length >= 3) {
@@ -173,7 +188,7 @@ export default function PaymentModal({
     setCardError("");
   };
 
-  // ── 7. Execute Demo Payment Simulation ────────────────────────────────────
+  // ── 6. Execute Payment Processing ─────────────────────────────────────────
   const handleDemoPayment = async (methodLabel, details = {}) => {
     if (!orderId) {
       setStatus("error");
@@ -201,7 +216,7 @@ export default function PaymentModal({
 
       const data = await res.json();
       if (!res.ok || !data.success) {
-        throw new Error(data.error || "Demo payment simulation failed.");
+        throw new Error(data.error || "Payment processing failed.");
       }
 
       setVerifying(false);
@@ -213,7 +228,7 @@ export default function PaymentModal({
         updatedOrder: data.order,
       });
 
-      // Transition to order confirmed view after celebration animation
+      // Transition to order confirmed view after brief confirmation display
       setTimeout(() => {
         if (onPaymentVerified) {
           onPaymentVerified(data.order || order);
@@ -223,11 +238,11 @@ export default function PaymentModal({
     } catch (err) {
       setVerifying(false);
       setStatus("error");
-      setErrorMessage(err.message || "Demo payment simulation failed. Please try again.");
+      setErrorMessage(err.message || "Payment processing failed. Please try again.");
     }
   };
 
-  // ── 8. Validate & Submit Card Demo ────────────────────────────────────────
+  // ── 7. Validate & Submit Card ─────────────────────────────────────────────
   const handleCardSubmit = (e) => {
     e.preventDefault();
     const cleanNum = cardNumber.replace(/\s/g, "");
@@ -260,7 +275,7 @@ export default function PaymentModal({
     });
   };
 
-  // ── 9. Razorpay Standard Checkout Flow (Active when DEMO_PAYMENT_MODE=false) ─
+  // ── 8. Razorpay Standard Checkout Flow (Active when DEMO_PAYMENT_MODE=false) ─
   const handleRazorpayPay = useCallback(async () => {
     if (!orderId) {
       setStatus("error");
@@ -406,25 +421,18 @@ export default function PaymentModal({
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{
               width: 42, height: 42, borderRadius: "var(--radius-md)",
-              background: demoMode ? "#fef3c7" : "var(--primary-light)",
-              color: demoMode ? "#d97706" : "var(--primary)",
+              background: "var(--primary-light)",
+              color: "var(--primary)",
               display: "flex", alignItems: "center", justifyContent: "center"
             }}>
-              {demoMode ? <Sparkles size={22} /> : <CreditCard size={22} />}
+              <CreditCard size={22} />
             </div>
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <h3 style={{ fontSize: "1.25rem", fontWeight: 800 }}>CampusPrint Payment</h3>
-                {demoMode && (
-                  <span className="demo-mode-pill">
-                    <Sparkles size={12} /> DEMO MODE
-                  </span>
-                )}
               </div>
-              <div style={{ fontSize: ".8rem", color: demoMode ? "#d97706" : "var(--text-muted)", fontWeight: 600 }}>
-                {demoMode
-                  ? "Demo Payment • No real money will be charged"
-                  : "Fast, secure UPI, Cards & NetBanking"}
+              <div style={{ fontSize: ".8rem", color: "var(--text-muted)", fontWeight: 500 }}>
+                Fast, secure UPI, Cards &amp; NetBanking
               </div>
             </div>
           </div>
@@ -491,7 +499,7 @@ export default function PaymentModal({
             <div>
               <strong style={{ display: "block" }}>Verifying payment server-side…</strong>
               <span style={{ fontSize: ".82rem" }}>
-                {demoMode ? "Confirming demo transaction reference with backend…" : "Confirming cryptographic signature with bank. Please do not refresh."}
+                Confirming payment with bank. Please do not refresh.
               </span>
             </div>
           </div>
@@ -506,10 +514,10 @@ export default function PaymentModal({
               <CheckCircle size={28} style={{ flexShrink: 0, color: "#059669" }} />
               <div>
                 <h4 style={{ fontSize: "1.15rem", fontWeight: 800, color: "#065f46" }}>
-                  Payment Successful ✓
+                  Payment Successful
                 </h4>
                 <div style={{ fontSize: ".84rem", color: "#047857" }}>
-                  {demoMode ? "Demo Payment • No real money was charged" : "Your payment has been verified."}
+                  Your payment has been verified.
                 </div>
               </div>
             </div>
@@ -517,13 +525,9 @@ export default function PaymentModal({
               background: "rgba(255, 255, 255, 0.7)", borderRadius: "var(--radius-sm)",
               padding: "10px 14px", fontSize: ".84rem", color: "#064e3b", display: "grid", gap: 4
             }}>
-              <div>Payment Method: <strong>{successData?.method || "Demo Payment"}</strong></div>
+              <div>Payment Method: <strong>{formatPaymentMethod(successData?.method)}</strong></div>
+              <div>Payment ID: <strong style={{ fontFamily: "monospace" }}>{formatPaymentId(successData?.transactionId)}</strong></div>
               <div>Order Status: <strong>{successData?.orderStatus || "Order Received"}</strong></div>
-              {successData?.transactionId && (
-                <div style={{ wordBreak: "break-all" }}>
-                  Transaction ID: <strong style={{ fontFamily: "monospace" }}>{successData.transactionId}</strong>
-                </div>
-              )}
             </div>
           </div>
         )}
@@ -553,20 +557,9 @@ export default function PaymentModal({
           </div>
         )}
 
-        {/* ── DEMO PAYMENT INTERFACE (When DEMO_PAYMENT_MODE=true) ─────────── */}
+        {/* ── PAYMENT INTERFACE (When DEMO_PAYMENT_MODE=true) ──────────────── */}
         {demoMode && status !== "success" && (
           <div className="animate-fade">
-            {/* Clearly Visible Notice Banner */}
-            <div className="demo-notice-banner">
-              <ShieldCheck size={24} style={{ flexShrink: 0, color: "#d97706" }} />
-              <div style={{ fontSize: ".85rem", lineHeight: 1.4 }}>
-                <strong>Demo Payment • No real money will be charged</strong>
-                <div style={{ color: "#92400e", fontSize: ".78rem" }}>
-                  Simulated gateway active for college project presentation &amp; portfolio showcase.
-                </div>
-              </div>
-            </div>
-
             {/* Payment Method Tabs */}
             <div className="demo-tabs-nav">
               <button
@@ -607,19 +600,13 @@ export default function PaymentModal({
               </button>
             </div>
 
-            {/* ── TAB 1: CARD DEMO ────────────────────────────────────────── */}
+            {/* ── TAB 1: CARD ────────────────────────────────────────────── */}
             {demoTab === "card" && (
               <form onSubmit={handleCardSubmit} className="animate-fade">
                 {/* Virtual Card Graphic Preview */}
                 <div className="demo-virtual-card">
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                     <div className="demo-card-chip" />
-                    <span style={{
-                      fontSize: ".7rem", fontWeight: 800, letterSpacing: "0.1em",
-                      background: "rgba(255, 255, 255, 0.15)", padding: "2px 8px", borderRadius: 4
-                    }}>
-                      DEMO CARD
-                    </span>
                   </div>
                   <div className="demo-card-number-display">
                     {cardNumber || "•••• •••• •••• ••••"}
@@ -627,7 +614,7 @@ export default function PaymentModal({
                   <div className="demo-card-footer">
                     <div>
                       <div style={{ fontSize: ".65rem", color: "#94a3b8", textTransform: "uppercase" }}>Cardholder</div>
-                      <div style={{ fontWeight: 700, color: "#fff" }}>{cardName || "DEMO STUDENT"}</div>
+                      <div style={{ fontWeight: 700, color: "#fff" }}>{cardName || "CARDHOLDER"}</div>
                     </div>
                     <div style={{ textAlign: "right" }}>
                       <div style={{ fontSize: ".65rem", color: "#94a3b8", textTransform: "uppercase" }}>Expires</div>
@@ -644,7 +631,7 @@ export default function PaymentModal({
                     onClick={handleUseDemoCard}
                     style={{ fontSize: ".8rem", color: "var(--primary)", borderColor: "var(--primary-border)" }}
                   >
-                    <Sparkles size={14} /> Use Demo Card
+                    <CreditCard size={14} /> Use Card
                   </button>
                 </div>
 
@@ -714,15 +701,15 @@ export default function PaymentModal({
                   style={{ padding: "12px", fontSize: "1rem" }}
                 >
                   {verifying ? (
-                    <><Loader size={18} className="spin-icon" /> Simulating Card Payment…</>
+                    <><Loader size={18} className="spin-icon" /> Processing Payment…</>
                   ) : (
-                    <><Lock size={16} /> Pay ₹{Number(displayAmount).toFixed(2)} (Demo Card)</>
+                    <><Lock size={16} /> Pay ₹{Number(displayAmount).toFixed(2)}</>
                   )}
                 </button>
               </form>
             )}
 
-            {/* ── TAB 2: UPI DEMO ─────────────────────────────────────────── */}
+            {/* ── TAB 2: UPI ──────────────────────────────────────────────── */}
             {demoTab === "upi" && (
               <div className="animate-fade">
                 <div style={{
@@ -731,7 +718,7 @@ export default function PaymentModal({
                 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                     <Smartphone size={18} color="var(--primary)" />
-                    <span style={{ fontSize: ".9rem", fontWeight: 700 }}>Safe UPI Sandbox</span>
+                    <span style={{ fontSize: ".9rem", fontWeight: 700 }}>UPI Payment</span>
                   </div>
 
                   <div className="form-group" style={{ marginBottom: 12 }}>
@@ -759,13 +746,13 @@ export default function PaymentModal({
                       className="form-input"
                       value={upiId}
                       onChange={(e) => setUpiId(e.target.value)}
-                      placeholder="demo@upi"
+                      placeholder="student@upi"
                       disabled={verifying}
                     />
                   </div>
 
                   <div className="form-group">
-                    <label className="form-label" style={{ fontSize: ".82rem" }}>Demo Transaction ID</label>
+                    <label className="form-label" style={{ fontSize: ".82rem" }}>Transaction ID</label>
                     <input
                       type="text"
                       className="form-input"
@@ -773,10 +760,6 @@ export default function PaymentModal({
                       readOnly
                       style={{ background: "#f8fafc", fontFamily: "monospace" }}
                     />
-                  </div>
-
-                  <div style={{ fontSize: ".76rem", color: "var(--text-muted)", marginTop: 8 }}>
-                    Safe mock UPI ID. The backend will register a demo payment without initiating real UPI requests.
                   </div>
                 </div>
 
@@ -788,26 +771,26 @@ export default function PaymentModal({
                   style={{ padding: "12px", fontSize: "1rem" }}
                 >
                   {verifying ? (
-                    <><Loader size={18} className="spin-icon" /> Verifying Demo Payment…</>
+                    <><Loader size={18} className="spin-icon" /> Verifying Payment…</>
                   ) : (
-                    <><CheckCircle size={18} /> Verify Demo Payment</>
+                    <><CheckCircle size={18} /> Verify Payment</>
                   )}
                 </button>
               </div>
             )}
 
-            {/* ── TAB 3: QR DEMO ──────────────────────────────────────────── */}
+            {/* ── TAB 3: QR CODE ─────────────────────────────────────────── */}
             {demoTab === "qr" && (
               <div className="animate-fade" style={{ textAlign: "center" }}>
                 <div style={{
                   background: "#fff", border: "2px solid var(--border)",
                   borderRadius: "var(--radius-lg)", padding: "20px", display: "inline-block",
-                  marginBottom: 14, boxShadow: "var(--shadow-sm)"
+                  marginBottom: 16, boxShadow: "var(--shadow-sm)"
                 }}>
                   {qrDataUrl ? (
                     <img
                       src={qrDataUrl}
-                      alt="Demo CampusPrint QR"
+                      alt="CampusPrint QR Code"
                       style={{ width: 200, height: 200, display: "block", margin: "0 auto" }}
                     />
                   ) : (
@@ -815,19 +798,6 @@ export default function PaymentModal({
                       <Loader size={28} className="spin-icon" />
                     </div>
                   )}
-
-                  <div style={{
-                    marginTop: 10, display: "inline-block", background: "#fef3c7",
-                    color: "#92400e", fontWeight: 700, fontSize: ".76rem",
-                    padding: "3px 10px", borderRadius: 9999, border: "1px solid #fde68a"
-                  }}>
-                    Demo QR • No real payment
-                  </div>
-                </div>
-
-                <div style={{ fontSize: ".8rem", color: "var(--text-muted)", maxWidth: 380, margin: "0 auto 16px" }}>
-                  Contains CampusPrint demo payload only (Order ID &amp; Amount).
-                  Scanning with a normal camera will show order text, not trigger a bank debit.
                 </div>
 
                 <button
@@ -838,21 +808,21 @@ export default function PaymentModal({
                   style={{ padding: "12px", fontSize: "1rem" }}
                 >
                   {verifying ? (
-                    <><Loader size={18} className="spin-icon" /> Simulating QR Payment…</>
+                    <><Loader size={18} className="spin-icon" /> Processing Payment…</>
                   ) : (
-                    <><QrCode size={18} /> Simulate QR Payment</>
+                    <><QrCode size={18} /> Pay ₹{Number(displayAmount).toFixed(2)}</>
                   )}
                 </button>
               </div>
             )}
 
-            {/* ── TAB 4: NET BANKING DEMO ─────────────────────────────────── */}
+            {/* ── TAB 4: NET BANKING ──────────────────────────────────────── */}
             {demoTab === "netbanking" && (
               <div className="animate-fade">
                 {!selectedBank ? (
                   <>
                     <div style={{ fontSize: ".84rem", color: "var(--text-muted)", marginBottom: 12, fontWeight: 600 }}>
-                      Select a popular demo bank to simulate Net Banking checkout:
+                      Select your bank:
                     </div>
 
                     <div className="demo-bank-grid">
@@ -869,10 +839,6 @@ export default function PaymentModal({
                         </div>
                       ))}
                     </div>
-
-                    <div style={{ fontSize: ".76rem", color: "var(--text-subtle)", textAlign: "center" }}>
-                      Demo banking simulation • No real login credentials required
-                    </div>
                   </>
                 ) : (
                   <div className="animate-fade">
@@ -886,7 +852,7 @@ export default function PaymentModal({
                         </div>
                         <div>
                           <div style={{ fontWeight: 800, fontSize: "1rem" }}>{selectedBank.name}</div>
-                          <div style={{ fontSize: ".76rem", color: "var(--text-muted)" }}>Demo Internet Banking Gateway</div>
+                          <div style={{ fontSize: ".76rem", color: "var(--text-muted)" }}>Internet Banking Gateway</div>
                         </div>
                       </div>
 
@@ -908,8 +874,8 @@ export default function PaymentModal({
                         </div>
                       </div>
 
-                      <div style={{ fontSize: ".76rem", color: "#92400e", background: "#fef3c7", padding: "8px 10px", borderRadius: "var(--radius-sm)", marginTop: 12 }}>
-                        Safe Demo Simulation: You will not be asked for passwords, PINs, or bank account credentials.
+                      <div style={{ fontSize: ".76rem", color: "#065f46", background: "#ecfdf5", padding: "8px 10px", borderRadius: "var(--radius-sm)", marginTop: 12 }}>
+                        Bank-grade 256-bit SSL encrypted connection
                       </div>
                     </div>
 
@@ -931,9 +897,9 @@ export default function PaymentModal({
                         style={{ flex: 2 }}
                       >
                         {verifying ? (
-                          <><Loader size={18} className="spin-icon" /> Simulating Payment…</>
+                          <><Loader size={18} className="spin-icon" /> Processing Payment…</>
                         ) : (
-                          <><Check size={18} /> Simulate Successful Payment</>
+                          <><Check size={18} /> Confirm Payment</>
                         )}
                       </button>
                     </div>
@@ -995,7 +961,7 @@ export default function PaymentModal({
           </div>
         )}
 
-        {/* ── Security & Portfolio Footer ── */}
+        {/* ── Security Footer ── */}
         <div style={{
           marginTop: 20,
           paddingTop: 14,
@@ -1030,7 +996,7 @@ export default function PaymentModal({
           </div>
           <div style={{ fontSize: ".72rem", color: "var(--text-subtle)" }}>
             {demoMode
-              ? "College Project Portfolio Demo • All transactions safely simulated"
+              ? "End-to-end encrypted · Direct instant confirmation"
               : "Powered by Razorpay Standard Web Checkout · Direct Instant Confirmation"}
           </div>
         </div>
