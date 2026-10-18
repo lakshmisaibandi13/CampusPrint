@@ -1,6 +1,6 @@
 import { Printer, Zap, Shield, Clock, Upload, CheckCircle } from "lucide-react";
 
-export default function LandingHero({ onOrderNow }) {
+export default function LandingHero({ onOrderNow, onViewPricing }) {
   const features = [
     {
       icon: <Upload size={24} />,
@@ -48,17 +48,14 @@ export default function LandingHero({ onOrderNow }) {
                   <Printer size={18} />
                   Place Order Now
                 </button>
-                <button className="btn btn-secondary" onClick={onOrderNow}>
+                <button className="btn btn-secondary" onClick={onViewPricing}>
                   View Pricing
                 </button>
               </div>
             </div>
 
             <div className="hero-stats-card">
-              <div className="hero-stats-header">
-                <span style={{ color: "#fff", fontWeight: 700, fontSize: ".95rem" }}>
-                  Print Rates 2026
-                </span>
+              <div className="hero-stats-header" style={{ justifyContent: "flex-end" }}>
                 <span className="shop-status-badge">
                   <span className="pulse-dot" />
                   Open Now

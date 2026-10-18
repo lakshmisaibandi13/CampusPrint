@@ -329,12 +329,33 @@ function FileCard({ item, index, onUpdate, onRemove, pricingConfig }) {
   );
 }
 
-// ── Confirmed order view ──────────────────────────────────────────────────────
+function getCollectionMessage(order, items, stationeryItems) {
+  const timeStr = order?.readable_collection_time || (
+    order?.estimated_collection_time 
+      ? new Date(order.estimated_collection_time).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata" }) 
+      : null
+  );
+  if (!timeStr) return null;
+
+  const hasStationery = (stationeryItems && stationeryItems.length > 0) || (order?.stationery_items && order.stationery_items.length > 0) || order?.order_type === "stationery_only" || order?.order_type === "printing_and_stationery";
+  const hasPrint = (items && items.length > 0) || order?.has_files || (order?.files && order.files.length > 0) || order?.order_type === "printing_only" || order?.order_type === "printing_and_stationery";
+
+  if (hasPrint && hasStationery) {
+    return `Please collect your print and stationery at ${timeStr}.`;
+  } else if (hasStationery && !hasPrint) {
+    return `Please collect your stationery at ${timeStr}.`;
+  } else {
+    return `Please collect your print at ${timeStr}.`;
+  }
+}
+
 // ── Confirmed order view ──────────────────────────────────────────────────────
 function ConfirmedView({ order, items, stationeryItems, onTrack, onReset }) {
   const displayItems = stationeryItems && stationeryItems.length > 0
     ? stationeryItems
     : (order.stationery_items || []);
+
+  const collectionMsg = getCollectionMessage(order, items, displayItems);
 
   return (
     <div className="container" style={{ padding: "40px 20px 60px" }}>
@@ -354,6 +375,11 @@ function ConfirmedView({ order, items, stationeryItems, onTrack, onReset }) {
           <CheckCircle size={18} style={{ flexShrink: 0, marginTop: 2 }} />
           <div>
             <strong>Order placed successfully — payment verified!</strong>
+            {collectionMsg && (
+              <div style={{ marginTop: 6, fontSize: ".95rem", fontWeight: 700, color: "var(--success, #16a34a)" }}>
+                {collectionMsg}
+              </div>
+            )}
             <div style={{ marginTop: 4, fontSize: ".88rem" }}>
               Show your order or token number at the counter to collect your items.
             </div>
@@ -883,13 +909,12 @@ export default function OrderForm({ onTabChange }) {
     { id: "project_report", name: "Final Project Report",            extra_cost: 15 },
     { id: "certificate",    name: "Glossy / Certificate Print",      extra_cost: 20 },
   ];
-  const bindings = pricingConfig?.bindings || [
+  const bindings = (pricingConfig?.bindings || [
     { id: "none",          name: "No Binding",                price: 0   },
-    { id: "corner_staple", name: "Corner Staple",             price: 2   },
     { id: "spiral",        name: "Spiral Binding",            price: 30  },
     { id: "soft_binding",  name: "Soft Book Binding",         price: 50  },
     { id: "hard_binding",  name: "Hard Bound Golden Embossed",price: 160 },
-  ];
+  ]).filter((b) => b.id !== "corner_staple");
 
   return (
     <div
@@ -1053,7 +1078,7 @@ export default function OrderForm({ onTabChange }) {
             <div className="form-group">
               <label className="form-label">Special Instructions (optional)</label>
               <textarea className="form-textarea" rows={3}
-                placeholder="e.g. Staple on top-left, first page in colour…"
+                placeholder="e.g. First page in colour, spiral bind on left…"
                 value={specialInstructions}
                 onChange={(e) => setSpecialInstructions(e.target.value)} />
             </div>

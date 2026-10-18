@@ -40,6 +40,10 @@ class TestFinalCampusPrintFixes(unittest.TestCase):
         cls.client = cls.app.test_client()
         conn = get_db_connection()
         cur = conn.cursor()
+        cur.execute("DELETE FROM order_items WHERE order_id IN (SELECT order_id FROM orders WHERE roll_number IN ('ST-99', 'MX-101') OR roll_number LIKE 'TEST-%' OR roll_number LIKE 'CONC-%' OR roll_number LIKE 'DA-%' OR roll_number LIKE 'DB-%')")
+        cur.execute("DELETE FROM order_stationery_items WHERE order_id IN (SELECT order_id FROM orders WHERE roll_number IN ('ST-99', 'MX-101') OR roll_number LIKE 'TEST-%' OR roll_number LIKE 'CONC-%' OR roll_number LIKE 'DA-%' OR roll_number LIKE 'DB-%')")
+        cur.execute("DELETE FROM orders WHERE roll_number IN ('ST-99', 'MX-101') OR roll_number LIKE 'TEST-%' OR roll_number LIKE 'CONC-%' OR roll_number LIKE 'DA-%' OR roll_number LIKE 'DB-%'")
+        conn.commit()
         cur.execute("SELECT COALESCE(MAX(id), 0) FROM orders")
         cls.start_id = cur.fetchone()[0]
         conn.close()
@@ -48,9 +52,9 @@ class TestFinalCampusPrintFixes(unittest.TestCase):
     def tearDownClass(cls):
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("DELETE FROM order_items WHERE order_id IN (SELECT order_id FROM orders WHERE id > ?)", (cls.start_id,))
-        cur.execute("DELETE FROM order_stationery_items WHERE order_id IN (SELECT order_id FROM orders WHERE id > ?)", (cls.start_id,))
-        cur.execute("DELETE FROM orders WHERE id > ?", (cls.start_id,))
+        cur.execute("DELETE FROM order_items WHERE order_id IN (SELECT order_id FROM orders WHERE id > ? OR roll_number IN ('ST-99', 'MX-101') OR roll_number LIKE 'TEST-%' OR roll_number LIKE 'CONC-%' OR roll_number LIKE 'DA-%' OR roll_number LIKE 'DB-%')", (cls.start_id,))
+        cur.execute("DELETE FROM order_stationery_items WHERE order_id IN (SELECT order_id FROM orders WHERE id > ? OR roll_number IN ('ST-99', 'MX-101') OR roll_number LIKE 'TEST-%' OR roll_number LIKE 'CONC-%' OR roll_number LIKE 'DA-%' OR roll_number LIKE 'DB-%')", (cls.start_id,))
+        cur.execute("DELETE FROM orders WHERE id > ? OR roll_number IN ('ST-99', 'MX-101') OR roll_number LIKE 'TEST-%' OR roll_number LIKE 'CONC-%' OR roll_number LIKE 'DA-%' OR roll_number LIKE 'DB-%'", (cls.start_id,))
         conn.commit()
         conn.close()
 

@@ -5,7 +5,7 @@ export default function Navbar({ activeTab, setActiveTab }) {
     <nav className="navbar">
       <div className="container">
         <div className="navbar-inner">
-          <div className="brand-logo">
+          <div className="brand-logo" onClick={() => setActiveTab("home")} style={{ cursor: "pointer" }}>
             <div className="logo-badge">
               <Printer size={22} />
             </div>

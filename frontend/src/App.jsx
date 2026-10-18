@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Navbar from "./components/Navbar";
 import LandingHero from "./components/LandingHero";
+import PricingView from "./components/PricingView";
 import OrderForm from "./components/OrderForm";
 import TrackOrder from "./components/TrackOrder";
 import StaffPortal from "./components/StaffPortal";
@@ -15,7 +16,16 @@ export default function App() {
 
       <main className="main-content">
         {activeTab === "home" && (
-          <LandingHero onOrderNow={() => setActiveTab("order")} />
+          <LandingHero
+            onOrderNow={() => setActiveTab("order")}
+            onViewPricing={() => setActiveTab("pricing")}
+          />
+        )}
+        {activeTab === "pricing" && (
+          <PricingView
+            onOrderNow={() => setActiveTab("order")}
+            onBack={() => setActiveTab("home")}
+          />
         )}
         {activeTab === "order" && (
           <OrderForm onTabChange={setActiveTab} />

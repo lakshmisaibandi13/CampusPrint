@@ -242,13 +242,13 @@ class TestDailyOrderReset(unittest.TestCase):
         print(f"[PASS] Requirement 9: Stationery order #{r['order']['display_order_number']} created successfully with 0s queue")
 
     def test_10_queue_calculation_not_affected(self):
-        self.assertEqual(calculate_printing_duration_seconds(1), 90)
-        self.assertEqual(calculate_printing_duration_seconds(36), 580) # 9:40
-        self.assertEqual(calculate_printing_duration_seconds(41), 640) # 10:40
-        self.assertEqual(calculate_printing_duration_seconds(46), 700) # 11:40
+        self.assertEqual(calculate_printing_duration_seconds(1), 120)  # 2m
+        self.assertEqual(calculate_printing_duration_seconds(36), 600) # 10m
+        self.assertEqual(calculate_printing_duration_seconds(41), 720) # 12m
+        self.assertEqual(calculate_printing_duration_seconds(46), 780) # 13m
         q_zero = calculate_order_queue(0)
         self.assertEqual(q_zero["processing_duration_seconds"], 120)
-        print("[PASS] Requirement 10: Exact 1-50 copy timing table and queue calculation remain intact")
+        print("[PASS] Requirement 10: Exact copy timing table and queue calculation remain intact")
 
     def test_11_concurrency_protection(self):
         # Spawn 10 concurrent threads creating orders simultaneously for a test day

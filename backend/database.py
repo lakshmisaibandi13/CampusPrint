@@ -3,9 +3,12 @@ import re
 import random
 import string
 import threading
+import logging
 import sqlite3
 from datetime import datetime, date, timedelta, timezone
 from config import Config
+
+logger = logging.getLogger("campusprint.database")
 
 # Asia/Kolkata (IST, UTC+05:30) timezone definition
 try:
@@ -43,12 +46,54 @@ except ImportError:
     PSYCOPG2_AVAILABLE = False
 
 _order_creation_lock = threading.Lock()
+QUEUE_LOCK_ID = 74218901
 
 
 def is_postgres() -> bool:
     """Return True if a DATABASE_URL is configured for PostgreSQL."""
     db_url = getattr(Config, "DATABASE_URL", None) or os.environ.get("DATABASE_URL")
     return bool(db_url and db_url.strip())
+
+
+def safe_row_get(row, key, default=None):
+    """
+    Safely access column value from sqlite3.Row, psycopg2 DictRow, or standard dict.
+    Avoids AttributeError when calling .get() on sqlite3.Row.
+    """
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        val = row[key]
+        return val if val is not None else default
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def acquire_queue_lock(conn):
+    """
+    Acquire cross-process database-level lock for queue ordering and recalculation.
+    - SQLite: Executes BEGIN IMMEDIATE to acquire exclusive write lock.
+    - PostgreSQL: Uses transaction-level advisory lock (pg_advisory_xact_lock)
+      and locks the orders table, serializing concurrent worker processes safely.
+    """
+    if is_postgres():
+        try:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT pg_advisory_xact_lock({QUEUE_LOCK_ID});")
+        except Exception as e:
+            logger.warning("Could not acquire Postgres advisory lock: %s", e)
+            try:
+                cursor = conn.cursor()
+                cursor.execute("LOCK TABLE orders IN SHARE ROW EXCLUSIVE MODE;")
+            except Exception:
+                pass
+    else:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except Exception:
+            pass
 
 
 def _to_pg_query(sql: str) -> str:
@@ -604,58 +649,171 @@ def calculate_order_price(pages, copies, color_mode, side_mode, print_type_id="r
     }
 
 
-def calculate_printing_duration_seconds(total_pages: int) -> int:
+def calculate_printing_duration_seconds(copies: int) -> int:
     """
-    Printing Processing-Time Table (exact threshold-based):
-    1–5 print copies/pages   = 1 minute 30 seconds (90s)
-    6–10 print copies/pages  = 3 minutes (180s)
-    11–15 print copies/pages = 4 minutes (240s)
-    16–20 print copies/pages = 6 minutes (360s)
-    21–25 print copies/pages = 7 minutes (420s)
-    26–30 print copies/pages = 8 minutes (480s)
-    31–35 print copies/pages = 9 minutes (540s)
-    36–40 print copies/pages = 9 minutes 40 seconds (580s)
-    41–45 print copies/pages = 10 minutes 40 seconds (640s)
-    46–50 print copies/pages = 11 minutes 40 seconds (700s)
-    >50 pages: 700s + 60s per additional 5 pages.
+    Printing Processing-Time Table (exact whole-minute durations based on copy count):
+    1–5 copies   = 2 minutes (120s)
+    6–10 copies  = 3 minutes (180s)
+    11–15 copies = 4 minutes (240s)
+    16–20 copies = 6 minutes (360s)
+    21–25 copies = 7 minutes (420s)
+    26–30 copies = 8 minutes (480s)
+    31–35 copies = 9 minutes (540s)
+    36–40 copies = 10 minutes (600s)
+    41–45 copies = 12 minutes (720s)
+    46–50 copies = 13 minutes (780s)
+    51–55 copies = 14 minutes (840s)
+    56–60 copies = 16 minutes (960s)
+    >60 copies   = 20 minutes (1200s)
     """
-    if total_pages <= 0:
+    if copies <= 0:
         return 0
-    if 1 <= total_pages <= 5:
-        return 90
-    elif 6 <= total_pages <= 10:
+    if 1 <= copies <= 5:
+        return 120
+    elif 6 <= copies <= 10:
         return 180
-    elif 11 <= total_pages <= 15:
+    elif 11 <= copies <= 15:
         return 240
-    elif 16 <= total_pages <= 20:
+    elif 16 <= copies <= 20:
         return 360
-    elif 21 <= total_pages <= 25:
+    elif 21 <= copies <= 25:
         return 420
-    elif 26 <= total_pages <= 30:
+    elif 26 <= copies <= 30:
         return 480
-    elif 31 <= total_pages <= 35:
+    elif 31 <= copies <= 35:
         return 540
-    elif 36 <= total_pages <= 40:
-        return 580
-    elif 41 <= total_pages <= 45:
-        return 640
-    elif 46 <= total_pages <= 50:
-        return 700
+    elif 36 <= copies <= 40:
+        return 600
+    elif 41 <= copies <= 45:
+        return 720
+    elif 46 <= copies <= 50:
+        return 780
+    elif 51 <= copies <= 55:
+        return 840
+    elif 56 <= copies <= 60:
+        return 960
     else:
-        extra_blocks = (total_pages - 50 + 4) // 5
-        return 700 + extra_blocks * 60
+        return 1200
 
 
-def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
+def get_order_duration_seconds(order_type: str = "printing", copies: int = 1, has_files: bool = True) -> int:
+    """
+    Centralized duration calculation for printing, stationery, and combined orders:
+    - Printing only: processing duration from the copy-count table.
+    - Stationery only: 2 minutes of processing time.
+    - Printing + stationery: printing processing time only (no extra 2 min).
+    """
+    ot = (order_type or "").lower().strip()
+    if ot == "stationery" or not has_files or copies <= 0:
+        return 120
+    return calculate_printing_duration_seconds(copies)
+
+
+def recalculate_active_queue_etas(conn=None):
+    """
+    Recalculate affected collection estimates for unfinished orders in the serial queue
+    when an order is created, completed, cancelled, or otherwise changes the queue.
+    Ensures safe queue synchronization and excludes completed/cancelled orders.
+    Delayed unfinished orders whose previous ETA has passed are NOT excluded.
+    Orders marked 'Ready for Collection' or 'Stage Ready' are already printed and
+    do not contribute processing time to subsequent orders.
+    """
+    _own = conn is None
+    if _own:
+        conn = get_db_connection()
+    try:
+        acquire_queue_lock(conn)
+        cursor = conn.cursor()
+        now = get_ist_now()
+        today_date = now.strftime("%Y-%m-%d")
+
+        cursor.execute("""
+            SELECT id, order_id, order_type, copies, print_pages_total, pages,
+                   processing_duration_seconds, estimated_start_time, estimated_collection_time,
+                   created_at, order_status
+            FROM orders
+            WHERE DATE(created_at) = ?
+              AND LOWER(order_status) NOT IN ('completed', 'collected', 'cancelled', 'canceled', 'rejected', 'ready for collection', 'stage ready')
+              AND LOWER(COALESCE(payment_status, 'verified')) NOT IN ('failed', 'rejected')
+            ORDER BY id ASC
+        """, (today_date,))
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        printer_time = now
+        overall_time = now
+        printing_pos = 0
+
+        for row in rows:
+            dur = row.get("processing_duration_seconds")
+            p_type = row.get("order_type") or "printing"
+            p_copies = int(row.get("copies") or 0)
+            p_is_stat_only = (p_type == "stationery" or p_copies <= 0)
+
+            if not dur or dur <= 0:
+                c = p_copies if p_copies > 0 else 1
+                dur = get_order_duration_seconds(p_type, c)
+
+            created_dt = to_ist_datetime(row.get("created_at")) or now
+
+            if p_is_stat_only:
+                start_time = max(overall_time, created_dt, now)
+                coll_time = start_time + timedelta(seconds=dur)
+                if coll_time > overall_time:
+                    overall_time = coll_time
+                q_pos = 0
+            else:
+                printing_pos += 1
+                start_time = max(printer_time, created_dt, now)
+                coll_time = start_time + timedelta(seconds=dur)
+                printer_time = coll_time
+                if coll_time > overall_time:
+                    overall_time = coll_time
+                q_pos = printing_pos
+
+            cursor.execute("""
+                UPDATE orders
+                SET processing_duration_seconds = ?,
+                    queue_position = ?,
+                    estimated_start_time = ?,
+                    estimated_collection_time = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                dur,
+                q_pos,
+                start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                coll_time.strftime("%Y-%m-%d %H:%M:%S"),
+                row["id"]
+            ))
+
+        conn.commit()
+    except Exception as e:
+        logger.exception("Failed to recalculate active queue ETAs: %s", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        if _own:
+            conn.close()
+
+
+def calculate_order_queue(copies: int = 1, conn=None, order_type: str = "printing", has_files: bool = True) -> dict:
     """
     Two-Worker Shop Model:
       Worker 1: Printing / Xerox (bottleneck queue)
       Worker 2: Stationery preparation (in parallel)
 
-    Stationery-only orders do NOT enter or add time to the printing queue.
-    Printing / Mixed orders queue sequentially behind active pending printing orders.
-    When an order is Ready for Collection, Completed, Collected, or Rejected,
-    its remaining time is automatically excluded from the queue.
+    - Printing only: duration from copy-count table.
+    - Stationery only: 2 minutes processing time, queue_position = 0.
+    - Printing + stationery: printing processing time only (no extra 2 min).
+    - Stationery-only orders do not enter or delay the printing queue.
+    - If a stationery-only order is waiting behind earlier unfinished orders,
+      earlier orders are included in its collection estimate.
+    - Serial queue entries are ordered using server-side timestamps and DB id tie-breaker.
+    - Excludes completed, collected, and cancelled orders from unfinished queue.
+    - Includes delayed unfinished orders whose previous ETA has passed.
     """
     _own = conn is None
     if _own:
@@ -663,75 +821,72 @@ def calculate_order_queue(total_print_pages: int, conn=None) -> dict:
     cursor = conn.cursor()
 
     now = get_ist_now()
+    duration_seconds = get_order_duration_seconds(order_type=order_type, copies=copies, has_files=has_files)
+    is_incoming_stationery = (copies <= 0 or order_type == "stationery")
 
-    # Stationery only: Worker 2 prepares in parallel
-    if total_print_pages <= 0:
-        duration_seconds = 120  # Fixed 2 minutes total for any stationery-only order
-        coll_time = now + timedelta(seconds=duration_seconds)
-        res = {
-            "processing_duration_seconds": duration_seconds,
-            "queue_position": 0,
-            "pending_orders_ahead": 0,
-            "estimated_start_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "estimated_collection_time": coll_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "readable_collection_time": coll_time.strftime("%I:%M %p").lstrip("0"),
-            "readable_duration": "2 min"
-        }
-        if _own:
-            conn.close()
-        return res
-
-    duration_seconds = calculate_printing_duration_seconds(total_print_pages)
-
-    # Fetch active pending printing orders from today.
-    # Excludes orders already Completed, Ready for Collection, Cancelled, or Failed payment.
+    # Fetch active unfinished orders from today in serial queue order
     today_date = now.strftime("%Y-%m-%d")
     cursor.execute("""
-        SELECT id, order_id, display_order_number, print_pages_total, pages, copies,
+        SELECT id, order_id, display_order_number, copies, order_type,
                processing_duration_seconds, estimated_collection_time, created_at, order_status, payment_status
         FROM orders
-        WHERE LOWER(order_status) IN ('received', 'order received', 'processing', 'printing in progress')
+        WHERE LOWER(order_status) NOT IN ('completed', 'collected', 'cancelled', 'canceled', 'rejected', 'ready for collection', 'stage ready')
           AND LOWER(COALESCE(payment_status, 'verified')) NOT IN ('failed', 'rejected')
-          AND (print_pages_total > 0 OR (print_pages_total IS NULL AND pages > 0))
           AND DATE(created_at) = ?
         ORDER BY id ASC
     """, (today_date,))
-    pending_rows = cursor.fetchall()
+    pending_rows = [dict(r) for r in cursor.fetchall()]
 
     printer_free_at = now
-    active_ahead_count = 0
+    overall_free_at = now
+    printing_orders_ahead = 0
 
     for p in pending_rows:
-        p_coll = to_ist_datetime(p["estimated_collection_time"])
-        if not p_coll:
-            p_pages = p["print_pages_total"] or (p["pages"] * (p["copies"] or 1))
-            p_dur = calculate_printing_duration_seconds(p_pages)
-            p_created = to_ist_datetime(p["created_at"]) or now
-            p_coll = p_created + timedelta(seconds=p_dur)
+        p_type = p.get("order_type") or "printing"
+        p_copies = int(p.get("copies") or 0)
+        p_is_stat_only = (p_type == "stationery" or p_copies <= 0)
 
-        # Only orders whose collection time is in the future have remaining processing time
-        if p_coll and p_coll > now:
-            active_ahead_count += 1
+        p_dur = p.get("processing_duration_seconds")
+        if not p_dur or p_dur <= 0:
+            c = p_copies if p_copies > 0 else 1
+            p_dur = get_order_duration_seconds(p_type, c)
+
+        p_created = to_ist_datetime(p.get("created_at")) or now
+        persisted_coll = to_ist_datetime(p.get("estimated_collection_time"))
+
+        if persisted_coll and persisted_coll > now:
+            p_coll = persisted_coll
+        else:
+            base_time = printer_free_at if not p_is_stat_only else overall_free_at
+            p_start = max(base_time, p_created, now)
+            p_coll = p_start + timedelta(seconds=p_dur)
+
+        if p_coll > overall_free_at:
+            overall_free_at = p_coll
+
+        if not p_is_stat_only:
+            printing_orders_ahead += 1
             if p_coll > printer_free_at:
                 printer_free_at = p_coll
 
-    estimated_start = printer_free_at
-    estimated_collection = estimated_start + timedelta(seconds=duration_seconds)
-    queue_pos = active_ahead_count + 1
+    if is_incoming_stationery:
+        estimated_start = max(overall_free_at, now)
+        estimated_collection = estimated_start + timedelta(seconds=duration_seconds)
+        queue_pos = 0
+        pending_ahead = 0
+    else:
+        estimated_start = max(printer_free_at, now)
+        estimated_collection = estimated_start + timedelta(seconds=duration_seconds)
+        queue_pos = printing_orders_ahead + 1
+        pending_ahead = printing_orders_ahead
 
     m = duration_seconds // 60
-    s = duration_seconds % 60
-    if m > 0 and s > 0:
-        readable_dur = f"{m}m {s}s"
-    elif m > 0:
-        readable_dur = f"{m} min"
-    else:
-        readable_dur = f"{s} sec"
+    readable_dur = f"{m} min" if m > 0 else f"{duration_seconds} sec"
 
     res = {
         "processing_duration_seconds": duration_seconds,
         "queue_position": queue_pos,
-        "pending_orders_ahead": active_ahead_count,
+        "pending_orders_ahead": pending_ahead,
         "estimated_start_time": estimated_start.strftime("%Y-%m-%d %H:%M:%S"),
         "estimated_collection_time": estimated_collection.strftime("%Y-%m-%d %H:%M:%S"),
         "readable_collection_time": estimated_collection.strftime("%I:%M %p").lstrip("0"),
@@ -807,7 +962,16 @@ def _serialize_order(order_dict: dict, conn=None) -> dict:
 
     # Calculate live queue position if order is currently pending
     st = (d.get("order_status") or "").lower()
-    if st in ("received", "order received", "processing", "printing in progress") and (d.get("print_pages_total", 0) > 0 or d.get("pages", 0) > 0):
+    is_terminal = st in ('completed', 'collected', 'cancelled', 'canceled', 'rejected', 'ready for collection', 'stage ready')
+    is_failed_pay = (d.get("payment_status") or "").lower() in ('failed', 'rejected')
+    d_type = d.get("order_type") or "printing"
+    d_copies = int(d.get("copies") or 0)
+    is_stat_only = (d_type == "stationery" or d_copies <= 0)
+
+    if is_terminal or is_failed_pay or is_stat_only:
+        d["pending_orders_ahead"] = 0
+        d["current_queue_position"] = 0
+    else:
         try:
             _own = conn is None
             c = get_db_connection() if _own else conn
@@ -817,10 +981,9 @@ def _serialize_order(order_dict: dict, conn=None) -> dict:
                 SELECT COUNT(*) FROM orders
                 WHERE id < ?
                   AND DATE(created_at) = ?
-                  AND LOWER(order_status) IN ('received', 'order received', 'processing', 'printing in progress')
+                  AND LOWER(order_status) NOT IN ('completed', 'collected', 'cancelled', 'canceled', 'rejected', 'ready for collection', 'stage ready')
                   AND LOWER(COALESCE(payment_status, 'verified')) NOT IN ('failed', 'rejected')
-                  AND LOWER(COALESCE(order_status, '')) NOT IN ('completed', 'collected', 'cancelled', 'canceled', 'ready for collection', 'stage ready', 'rejected')
-                  AND (print_pages_total > 0 OR (print_pages_total IS NULL AND pages > 0))
+                  AND (order_type != 'stationery' AND (copies > 0 OR print_pages_total > 0 OR pages > 0))
             """, (d["id"], order_created))
             ahead = cur.fetchone()[0]
             d["pending_orders_ahead"] = ahead
@@ -830,9 +993,6 @@ def _serialize_order(order_dict: dict, conn=None) -> dict:
         except Exception:
             d["pending_orders_ahead"] = 0
             d["current_queue_position"] = d.get("queue_position", 1)
-    else:
-        d["pending_orders_ahead"] = 0
-        d["current_queue_position"] = 0
 
     return d
 
@@ -841,10 +1001,7 @@ def create_order(order_data):
     import json
     with _order_creation_lock:
         conn = get_db_connection()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-        except Exception:
-            pass
+        acquire_queue_lock(conn)
 
         try:
             cursor = conn.cursor()
@@ -866,7 +1023,7 @@ def create_order(order_data):
             stationery_items = order_data.get("stationery_items", [])
             stationery_items_json = json.dumps(stationery_items) if isinstance(stationery_items, list) else str(stationery_items)
 
-            queue_info = calculate_order_queue(print_pages_total, conn=conn)
+            queue_info = calculate_order_queue(copies=copies, conn=conn, order_type=order_type, has_files=(order_type != "stationery"))
             initial_status = order_data.get("order_status", "Received")
 
             cursor.execute("""
@@ -944,14 +1101,39 @@ def find_order(search_query):
     query = search_query.strip().upper()
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    # 1. First check if query matches order_id or token_number directly
+    cursor.execute("""
+        SELECT * FROM orders
+        WHERE UPPER(order_id) = ? OR UPPER(token_number) = ?
+        ORDER BY id DESC LIMIT 1
+    """, (query, query))
+    primary_row = cursor.fetchone()
+
+    if primary_row:
+        primary_order = dict(primary_row)
+        roll = (primary_order.get("roll_number") or "").strip()
+        matched = [primary_order]
+        if roll:
+            cursor.execute("""
+                SELECT * FROM orders
+                WHERE UPPER(roll_number) = ? AND id != ?
+                ORDER BY id DESC LIMIT 50
+            """, (roll.upper(), primary_order["id"]))
+            other_rows = cursor.fetchall()
+            for r in other_rows:
+                matched.append(dict(r))
+        res = [_serialize_order(o, conn=conn) for o in matched]
+        conn.close()
+        return res
+
+    # 2. Search by student's roll number or phone number (shows only that customer's orders)
     cursor.execute("""
         SELECT * FROM orders 
-        WHERE UPPER(order_id) = ? 
-           OR UPPER(token_number) = ? 
-           OR UPPER(roll_number) = ? 
+        WHERE UPPER(roll_number) = ? 
            OR phone_number = ?
-        ORDER BY id DESC LIMIT 5
-    """, (query, query, query, search_query.strip()))
+        ORDER BY id DESC LIMIT 50
+    """, (query, search_query.strip()))
     rows = cursor.fetchall()
     res = [_serialize_order(dict(r), conn=conn) for r in rows]
     conn.close()
@@ -1004,14 +1186,25 @@ def list_orders(status=None, search=None, sort_by="desc"):
 
 def update_order_status(order_id, new_status, rejection_reason=None):
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE orders 
-        SET order_status = ?, rejection_reason = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE order_id = ?
-    """, (new_status, rejection_reason, order_id))
-    conn.commit()
-    
+    acquire_queue_lock(conn)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE orders 
+            SET order_status = ?, rejection_reason = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE order_id = ?
+        """, (new_status, rejection_reason, order_id))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise e
+
+    try:
+        recalculate_active_queue_etas(conn=conn)
+    except Exception as e:
+        logger.error("Queue recalculation failed in update_order_status for %s: %s", order_id, e)
+
     cursor.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
     row = cursor.fetchone()
     res = _serialize_order(dict(row), conn=conn) if row else None
@@ -1041,24 +1234,35 @@ def mark_order_paid(order_id: str, razorpay_payment_id: str = None,
     Transitions order_status from 'Pending Payment' to 'Order Received' if applicable.
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE orders
-        SET payment_status = 'Paid',
-            order_status = CASE 
-                WHEN LOWER(order_status) IN ('pending payment', 'received') THEN 'Order Received'
-                ELSE order_status 
-            END,
-            payment_completed_at = CURRENT_TIMESTAMP,
-            payment_method = 'Razorpay',
-            payment_id = COALESCE(?, payment_id, ?),
-            razorpay_payment_id = COALESCE(?, razorpay_payment_id),
-            razorpay_signature = COALESCE(?, razorpay_signature),
-            razorpay_order_id = COALESCE(?, razorpay_order_id),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE order_id = ?
-    """, (razorpay_payment_id, razorpay_payment_id, razorpay_payment_id, razorpay_signature, razorpay_order_id, order_id))
-    conn.commit()
+    acquire_queue_lock(conn)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE orders
+            SET payment_status = 'Paid',
+                order_status = CASE 
+                    WHEN LOWER(order_status) IN ('pending payment', 'received') THEN 'Order Received'
+                    ELSE order_status 
+                END,
+                payment_completed_at = CURRENT_TIMESTAMP,
+                payment_method = 'Razorpay',
+                payment_id = COALESCE(?, payment_id, ?),
+                razorpay_payment_id = COALESCE(?, razorpay_payment_id),
+                razorpay_signature = COALESCE(?, razorpay_signature),
+                razorpay_order_id = COALESCE(?, razorpay_order_id),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE order_id = ?
+        """, (razorpay_payment_id, razorpay_payment_id, razorpay_payment_id, razorpay_signature, razorpay_order_id, order_id))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise e
+
+    try:
+        recalculate_active_queue_etas(conn=conn)
+    except Exception as e:
+        logger.error("Queue recalculation failed in mark_order_paid for %s: %s", order_id, e)
 
     cursor.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
     row = cursor.fetchone()
@@ -1075,23 +1279,34 @@ def mark_order_demo_paid(order_id: str, demo_payment_id: str,
     Transitions order_status from 'Pending' / 'Received' to 'Order Received'.
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE orders
-        SET payment_status = 'Paid',
-            order_status = CASE 
-                WHEN LOWER(order_status) IN ('pending payment', 'received', 'pending') THEN 'Order Received'
-                ELSE order_status 
-            END,
-            payment_completed_at = CURRENT_TIMESTAMP,
-            payment_method = ?,
-            payment_id = ?,
-            razorpay_payment_id = ?,
-            demo_transaction_id = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE order_id = ?
-    """, (demo_payment_method, demo_payment_id, demo_payment_id, demo_payment_id, order_id))
-    conn.commit()
+    acquire_queue_lock(conn)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE orders
+            SET payment_status = 'Paid',
+                order_status = CASE 
+                    WHEN LOWER(order_status) IN ('pending payment', 'received', 'pending') THEN 'Order Received'
+                    ELSE order_status 
+                END,
+                payment_completed_at = CURRENT_TIMESTAMP,
+                payment_method = ?,
+                payment_id = ?,
+                razorpay_payment_id = ?,
+                demo_transaction_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE order_id = ?
+        """, (demo_payment_method, demo_payment_id, demo_payment_id, demo_payment_id, order_id))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise e
+
+    try:
+        recalculate_active_queue_etas(conn=conn)
+    except Exception as e:
+        logger.error("Queue recalculation failed in mark_order_demo_paid for %s: %s", order_id, e)
 
     cursor.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
     row = cursor.fetchone()
@@ -1164,10 +1379,7 @@ def create_multi_order(order_data: dict, items: list[dict] = None, stationery_it
     import json
     with _order_creation_lock:
         conn = get_db_connection()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-        except Exception:
-            pass
+        acquire_queue_lock(conn)
 
         try:
             cursor = conn.cursor()
@@ -1215,7 +1427,7 @@ def create_multi_order(order_data: dict, items: list[dict] = None, stationery_it
             grand_total      = float(order_data.get("total_price", printing_total + stationery_total))
             stationery_json  = json.dumps(stationery_items or [])
 
-            queue_info = calculate_order_queue(total_pages, conn=conn)
+            queue_info = calculate_order_queue(copies=total_copies, conn=conn, order_type=order_type, has_files=has_files)
             initial_status = order_data.get("order_status", "Order Received")
 
             cursor.execute("""

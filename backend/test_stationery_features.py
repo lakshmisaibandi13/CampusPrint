@@ -1,11 +1,13 @@
 """
 test_stationery_features.py — Verification of Stationery, Smart Queue & Tracking
 """
-import unittest, json, io, sys
+import os, sys, unittest, json, io
 try:
     sys.stdout.reconfigure(encoding='utf-8')
 except Exception:
     pass
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app import create_app
 from config import Config
@@ -32,6 +34,16 @@ class TestStationeryAndQueue(unittest.TestCase):
         cls.app = create_app()
         cls.client = cls.app.test_client()
 
+    @classmethod
+    def tearDownClass(cls):
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM order_items WHERE order_id IN (SELECT order_id FROM orders WHERE roll_number IN ('ST-99', 'MX-101'))")
+        cur.execute("DELETE FROM order_stationery_items WHERE order_id IN (SELECT order_id FROM orders WHERE roll_number IN ('ST-99', 'MX-101'))")
+        cur.execute("DELETE FROM orders WHERE roll_number IN ('ST-99', 'MX-101')")
+        conn.commit()
+        conn.close()
+
     def test_01_stationery_catalog(self):
         res = self.client.get("/api/stationery")
         self.assertEqual(res.status_code, 200)
@@ -55,31 +67,48 @@ class TestStationeryAndQueue(unittest.TestCase):
         print("[PASS] test_01  stationery catalog returns all 13 items with exact prices")
 
     def test_02_printing_duration_table(self):
-        # 1-5 pages: 90s (1m 30s)
-        self.assertEqual(calculate_printing_duration_seconds(1), 90)
-        self.assertEqual(calculate_printing_duration_seconds(5), 90)
-        # 6-10 pages: 180s (3m)
+        # 1-5 copies: 120s (2m)
+        self.assertEqual(calculate_printing_duration_seconds(1), 120)
+        self.assertEqual(calculate_printing_duration_seconds(5), 120)
+        # 6-10 copies: 180s (3m)
         self.assertEqual(calculate_printing_duration_seconds(6), 180)
         self.assertEqual(calculate_printing_duration_seconds(10), 180)
-        # 11-15 pages: 240s (4m)
+        # 11-15 copies: 240s (4m)
+        self.assertEqual(calculate_printing_duration_seconds(11), 240)
         self.assertEqual(calculate_printing_duration_seconds(15), 240)
-        # 16-20 pages: 360s (6m)
+        # 16-20 copies: 360s (6m)
+        self.assertEqual(calculate_printing_duration_seconds(16), 360)
         self.assertEqual(calculate_printing_duration_seconds(20), 360)
-        # 21-25 pages: 420s (7m)
+        # 21-25 copies: 420s (7m)
+        self.assertEqual(calculate_printing_duration_seconds(21), 420)
         self.assertEqual(calculate_printing_duration_seconds(25), 420)
-        # 26-30 pages: 480s (8m)
+        # 26-30 copies: 480s (8m)
+        self.assertEqual(calculate_printing_duration_seconds(26), 480)
         self.assertEqual(calculate_printing_duration_seconds(30), 480)
-        # 31-35 pages: 540s (9m)
+        # 31-35 copies: 540s (9m)
+        self.assertEqual(calculate_printing_duration_seconds(31), 540)
         self.assertEqual(calculate_printing_duration_seconds(35), 540)
-        # 36-40 pages: 580s (9m 40s)
-        self.assertEqual(calculate_printing_duration_seconds(40), 580)
-        # 41-45 pages: 640s (10m 40s)
-        self.assertEqual(calculate_printing_duration_seconds(45), 640)
-        # 46-50 pages: 700s (11m 40s)
-        self.assertEqual(calculate_printing_duration_seconds(50), 700)
-        # Stationery only (0 pages): 0s
+        # 36-40 copies: 600s (10m)
+        self.assertEqual(calculate_printing_duration_seconds(36), 600)
+        self.assertEqual(calculate_printing_duration_seconds(40), 600)
+        # 41-45 copies: 720s (12m)
+        self.assertEqual(calculate_printing_duration_seconds(41), 720)
+        self.assertEqual(calculate_printing_duration_seconds(45), 720)
+        # 46-50 copies: 780s (13m)
+        self.assertEqual(calculate_printing_duration_seconds(46), 780)
+        self.assertEqual(calculate_printing_duration_seconds(50), 780)
+        # 51-55 copies: 840s (14m)
+        self.assertEqual(calculate_printing_duration_seconds(51), 840)
+        self.assertEqual(calculate_printing_duration_seconds(55), 840)
+        # 56-60 copies: 960s (16m)
+        self.assertEqual(calculate_printing_duration_seconds(56), 960)
+        self.assertEqual(calculate_printing_duration_seconds(60), 960)
+        # >60 copies: 1200s (20m)
+        self.assertEqual(calculate_printing_duration_seconds(61), 1200)
+        self.assertEqual(calculate_printing_duration_seconds(100), 1200)
+        # 0 copies: 0s
         self.assertEqual(calculate_printing_duration_seconds(0), 0)
-        print("[PASS] test_02  printing duration table matches specification exactly")
+        print("[PASS] test_02  printing duration table matches updated specification exactly")
 
     def test_03_stationery_only_order(self):
         stationery_payload = [
@@ -135,7 +164,7 @@ class TestStationeryAndQueue(unittest.TestCase):
         self.assertEqual(order["stationery_total"], 35.0)
         self.assertEqual(order["total_price"], 43.0)
         self.assertEqual(order["print_pages_total"], 4)
-        self.assertEqual(order["processing_duration_seconds"], 90)
+        self.assertEqual(order["processing_duration_seconds"], 120)
         self.assertIsNotNone(order["readable_collection_time"])
         print(f"[PASS] test_04  mixed order created  #{order['display_order_number']}  print=Rs {order['printing_total']}  stationery=Rs {order['stationery_total']}  total=Rs {order['total_price']}")
 
