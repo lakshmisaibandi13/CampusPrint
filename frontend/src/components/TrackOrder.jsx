@@ -30,15 +30,62 @@ function getStageIndex(status, isPaid) {
   return 0; // Placed / Received
 }
 
+export function parseISTTimestamp(dateInput) {
+  if (!dateInput) return null;
+  if (typeof dateInput === "number") return dateInput;
+  if (dateInput instanceof Date) return isNaN(dateInput.getTime()) ? null : dateInput.getTime();
+
+  const str = String(dateInput).trim();
+  if (!str) return null;
+
+  // Check if string already contains timezone offset (Z, +HH:MM, -HH:MM)
+  if (/Z|[+-]\d{2}:?\d{2}$/.test(str)) {
+    const normalized = str.includes(" ") && !str.includes("T") ? str.replace(" ", "T") : str;
+    const d = new Date(normalized);
+    return isNaN(d.getTime()) ? null : d.getTime();
+  }
+
+  // Parse YYYY-MM-DD[T or space]HH:mm:ss(.sss)? in Asia/Kolkata (IST = UTC+05:30)
+  const match = str.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?/);
+  if (match) {
+    const [, yr, mo, da, hr, min, sec, ms] = match;
+    const msVal = ms ? parseInt(ms.slice(0, 3).padEnd(3, "0"), 10) : 0;
+    // Asia/Kolkata is UTC+05:30 (5 hours, 30 minutes = 19,800,000 milliseconds)
+    const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
+    const utcTime = Date.UTC(
+      parseInt(yr, 10),
+      parseInt(mo, 10) - 1,
+      parseInt(da, 10),
+      parseInt(hr, 10),
+      parseInt(min, 10),
+      parseInt(sec, 10),
+      msVal
+    );
+    return utcTime - istOffsetMs;
+  }
+
+  let normalized = str.replace(" ", "T");
+  if (!normalized.includes("+") && !normalized.includes("-") && !normalized.includes("Z")) {
+    normalized += "+05:30";
+  }
+  const fallbackDate = new Date(normalized);
+  return isNaN(fallbackDate.getTime()) ? null : fallbackDate.getTime();
+}
+
+export function formatCountdown(totalSec) {
+  if (!totalSec || totalSec <= 0) return "00:00";
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(m)}:${pad(s)}`;
+}
+
 function formatISTDateTime(dateInput) {
   if (!dateInput) return "";
   try {
-    let s = String(dateInput).trim();
-    if (!s.includes("Z") && !s.includes("+") && !/[+-]\d{2}:\d{2}$/.test(s)) {
-      s = s.replace(" ", "T") + "+05:30";
-    }
-    const d = new Date(s);
-    if (isNaN(d.getTime())) return String(dateInput);
+    const ms = parseISTTimestamp(dateInput);
+    if (!ms) return String(dateInput);
+    const d = new Date(ms);
     return d.toLocaleString("en-IN", {
       timeZone: "Asia/Kolkata",
       day: "numeric",
@@ -56,12 +103,9 @@ function formatISTDateTime(dateInput) {
 function formatISTTimeOnly(dateInput) {
   if (!dateInput) return "";
   try {
-    let s = String(dateInput).trim();
-    if (!s.includes("Z") && !s.includes("+") && !/[+-]\d{2}:\d{2}$/.test(s)) {
-      s = s.replace(" ", "T") + "+05:30";
-    }
-    const d = new Date(s);
-    if (isNaN(d.getTime())) return "";
+    const ms = parseISTTimestamp(dateInput);
+    if (!ms) return "";
+    const d = new Date(ms);
     return d.toLocaleTimeString("en-IN", {
       timeZone: "Asia/Kolkata",
       hour: "numeric",
@@ -156,29 +200,25 @@ function StatusBadge({ status }) {
 function LiveCountdown({ estimatedCollectionTime, status }) {
   const isReady = ["ready for collection", "stage ready", "ready"].includes((status || "").toLowerCase().trim());
 
-  const getRemainingSeconds = useCallback(() => {
+  const calculateRemainingSeconds = useCallback(() => {
     if (!estimatedCollectionTime) return 0;
-    let s = String(estimatedCollectionTime).trim();
-    if (!s.includes("Z") && !s.includes("+") && !/[+-]\d{2}:\d{2}$/.test(s)) {
-      s = s.replace(" ", "T") + "+05:30";
-    }
-    const targetMs = new Date(s).getTime();
-    if (isNaN(targetMs)) return 0;
+    const targetMs = parseISTTimestamp(estimatedCollectionTime);
+    if (!targetMs) return 0;
     return Math.max(0, Math.floor((targetMs - Date.now()) / 1000));
   }, [estimatedCollectionTime]);
 
-  const [secondsLeft, setSecondsLeft] = useState(getRemainingSeconds);
+  const [secondsLeft, setSecondsLeft] = useState(calculateRemainingSeconds);
 
   useEffect(() => {
-    setSecondsLeft(getRemainingSeconds());
+    setSecondsLeft(calculateRemainingSeconds());
     if (isReady || !estimatedCollectionTime) return;
 
     const interval = setInterval(() => {
-      setSecondsLeft(getRemainingSeconds());
+      setSecondsLeft(calculateRemainingSeconds());
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [estimatedCollectionTime, isReady, getRemainingSeconds]);
+  }, [estimatedCollectionTime, isReady, calculateRemainingSeconds]);
 
   if (isReady) {
     return (
@@ -188,22 +228,10 @@ function LiveCountdown({ estimatedCollectionTime, status }) {
     );
   }
 
-  const formatTimer = (totalSec) => {
-    if (totalSec <= 0) return "00:00";
-    const h = Math.floor(totalSec / 3600);
-    const m = Math.floor((totalSec % 3600) / 60);
-    const s = totalSec % 60;
-    const pad = (n) => String(n).padStart(2, "0");
-    if (h > 0) {
-      return `${pad(h)}:${pad(m)}:${pad(s)}`;
-    }
-    return `${pad(m)}:${pad(s)}`;
-  };
-
   return (
     <div className={`eta-countdown-pill ${secondsLeft === 0 ? "finishing" : ""}`}>
       <Clock size={16} />
-      <span>{secondsLeft > 0 ? formatTimer(secondsLeft) : "00:00"}</span>
+      <span>{formatCountdown(secondsLeft)}</span>
       {secondsLeft === 0 && (
         <span style={{ fontSize: ".72rem", color: "#fef08a", fontWeight: 600 }}>
           (Finishing up)
